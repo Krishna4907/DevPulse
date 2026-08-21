@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export async function POST(request: NextRequest) {
@@ -11,14 +11,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    if (!adminDb) {
-      return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
+    const db = getAdminDb();
+    if (!db) {
+      const missingVars = [];
+      if (!process.env.FIREBASE_ADMIN_PROJECT_ID && !process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID) missingVars.push('FIREBASE_ADMIN_PROJECT_ID');
+      if (!process.env.FIREBASE_ADMIN_CLIENT_EMAIL) missingVars.push('FIREBASE_ADMIN_CLIENT_EMAIL');
+      if (!process.env.FIREBASE_ADMIN_PRIVATE_KEY) missingVars.push('FIREBASE_ADMIN_PRIVATE_KEY');
+
+      return NextResponse.json(
+        { 
+          error: `Admin DB initialization failed. ${missingVars.length > 0 ? `Missing env vars in Vercel: ${missingVars.join(', ')}` : 'Check FIREBASE_ADMIN_PRIVATE_KEY format in Vercel.'}` 
+        }, 
+        { status: 500 }
+      );
     }
 
-    const batch = adminDb.batch();
+    const batch = db.batch();
 
     // 1. Create project document
-    const projRef = adminDb.collection('projects').doc();
+    const projRef = db.collection('projects').doc();
     const newProjectId = projRef.id;
 
     batch.set(projRef, {
@@ -49,7 +60,7 @@ export async function POST(request: NextRequest) {
     });
 
     // 3. Update user document
-    const userRef = adminDb.collection('users').doc(leaderId);
+    const userRef = db.collection('users').doc(leaderId);
     batch.set(
       userRef,
       {

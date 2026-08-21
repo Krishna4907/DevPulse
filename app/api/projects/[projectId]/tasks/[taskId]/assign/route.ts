@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export async function POST(
@@ -15,14 +15,15 @@ export async function POST(
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    if (!adminDb) {
+    const db = getAdminDb();
+    if (!db) {
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
 
-    const batch = adminDb.batch();
+    const batch = db.batch();
 
     // 1. Update task document
-    const taskRef = adminDb.collection('projects').doc(projectId).collection('tasks').doc(taskId);
+    const taskRef = db.collection('projects').doc(projectId).collection('tasks').doc(taskId);
     batch.update(taskRef, {
       assigneeId,
       partnerId: partnerId || null,
@@ -32,7 +33,7 @@ export async function POST(
 
     // 2. Update assignee pending skills
     if (Array.isArray(missingSkills) && missingSkills.length > 0) {
-      const assigneeRef = adminDb.collection('projects').doc(projectId).collection('members').doc(assigneeId);
+      const assigneeRef = db.collection('projects').doc(projectId).collection('members').doc(assigneeId);
       batch.set(
         assigneeRef,
         {
@@ -44,7 +45,7 @@ export async function POST(
 
     // 3. Update partner pending skills if paired
     if (partnerId && Array.isArray(partnerMissingSkills) && partnerMissingSkills.length > 0) {
-      const partnerRef = adminDb.collection('projects').doc(projectId).collection('members').doc(partnerId);
+      const partnerRef = db.collection('projects').doc(projectId).collection('members').doc(partnerId);
       batch.set(
         partnerRef,
         {

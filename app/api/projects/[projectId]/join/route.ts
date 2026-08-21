@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 import { FieldValue } from 'firebase-admin/firestore';
 
 export async function POST(
@@ -15,11 +15,12 @@ export async function POST(
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    if (!adminDb) {
+    const db = getAdminDb();
+    if (!db) {
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
 
-    const projRef = adminDb.collection('projects').doc(projectId);
+    const projRef = db.collection('projects').doc(projectId);
     const projDoc = await projRef.get();
 
     if (!projDoc.exists) {
@@ -41,7 +42,7 @@ export async function POST(
       return NextResponse.json({ error: 'Project is at maximum capacity' }, { status: 400 });
     }
 
-    const batch = adminDb.batch();
+    const batch = db.batch();
 
     // 1. Member document
     const memberRef = projRef.collection('members').doc(userId);
@@ -58,7 +59,7 @@ export async function POST(
     });
 
     // 2. Add projectId to user document
-    const userRef = adminDb.collection('users').doc(userId);
+    const userRef = db.collection('users').doc(userId);
     batch.set(
       userRef,
       {

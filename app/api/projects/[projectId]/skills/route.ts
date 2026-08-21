@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 
 export async function POST(
   request: NextRequest,
@@ -14,11 +14,12 @@ export async function POST(
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    if (!adminDb) {
+    const db = getAdminDb();
+    if (!db) {
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
 
-    const memberRef = adminDb.collection('projects').doc(projectId).collection('members').doc(userId);
+    const memberRef = db.collection('projects').doc(projectId).collection('members').doc(userId);
     await memberRef.set(
       {
         skills: Array.isArray(skills) ? skills : [],

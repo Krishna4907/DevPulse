@@ -1,36 +1,62 @@
-import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { initializeApp, getApps, cert, getApp } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 
 function formatPrivateKey(key: string): string {
-  // Remove wrapping quotes if present and convert literal \n to real newlines
-  const cleanKey = key.replace(/^["']|["']$/g, '');
-  return cleanKey.replace(/\\n/g, '\n');
+  if (!key) return '';
+  let formatted = key.trim();
+  
+  // Remove wrapping double or single quotes if pasted with them
+  if (
+    (formatted.startsWith('"') && formatted.endsWith('"')) ||
+    (formatted.startsWith("'") && formatted.endsWith("'"))
+  ) {
+    formatted = formatted.slice(1, -1);
+  }
+
+  // Convert literal string "\n" to real newline characters
+  formatted = formatted.replace(/\\n/g, '\n');
+  
+  // Normalize Windows \r\n line breaks
+  formatted = formatted.replace(/\r\n/g, '\n');
+
+  return formatted;
 }
 
-function getAdminFirestore(): Firestore | null {
-  if (
-    !process.env.FIREBASE_ADMIN_PROJECT_ID ||
-    !process.env.FIREBASE_ADMIN_CLIENT_EMAIL ||
-    !process.env.FIREBASE_ADMIN_PRIVATE_KEY
-  ) {
+export function getAdminDb(): Firestore | null {
+  const projectId = process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID;
+  const clientEmail = process.env.FIREBASE_ADMIN_CLIENT_EMAIL;
+  const privateKeyRaw = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+
+  if (!projectId || !clientEmail || !privateKeyRaw) {
+    console.error('Firebase Admin missing environment variables:', {
+      hasProjectId: !!projectId,
+      hasClientEmail: !!clientEmail,
+      hasPrivateKey: !!privateKeyRaw,
+    });
     return null;
   }
 
-  if (!getApps().length) {
-    try {
+  try {
+    if (!getApps().length) {
+      const privateKey = formatPrivateKey(privateKeyRaw);
       initializeApp({
         credential: cert({
-          projectId: process.env.FIREBASE_ADMIN_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
-          privateKey: formatPrivateKey(process.env.FIREBASE_ADMIN_PRIVATE_KEY),
+          projectId,
+          clientEmail,
+          privateKey,
         }),
       });
-    } catch (e) {
-      console.error('Firebase Admin init error:', e);
     }
+    return getFirestore(getApp());
+  } catch (error) {
+    console.error('Firebase Admin initialization error:', error);
+    try {
+      if (getApps().length) {
+        return getFirestore(getApp());
+      }
+    } catch {}
+    return null;
   }
-
-  return getApps().length ? getFirestore() : null;
 }
 
-export const adminDb = getAdminFirestore();
+export const adminDb = getAdminDb();

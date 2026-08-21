@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 
 export async function GET(
   request: NextRequest,
@@ -11,11 +11,12 @@ export async function GET(
       return NextResponse.json({ error: 'Missing projectId' }, { status: 400 });
     }
 
-    if (!adminDb) {
+    const db = getAdminDb();
+    if (!db) {
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
 
-    const projDoc = await adminDb.collection('projects').doc(projectId).get();
+    const projDoc = await db.collection('projects').doc(projectId).get();
     if (!projDoc.exists) {
       return NextResponse.json({ error: 'Project not found' }, { status: 404 });
     }
@@ -36,7 +37,7 @@ export async function GET(
     };
 
     // Fetch members subcollection
-    const membersSnap = await adminDb.collection('projects').doc(projectId).collection('members').get();
+    const membersSnap = await db.collection('projects').doc(projectId).collection('members').get();
     const members = membersSnap.docs.map((doc) => {
       const data = doc.data();
       return {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { adminDb } from '@/lib/firebase-admin';
+import { getAdminDb } from '@/lib/firebase-admin';
 
 export async function GET(
   request: NextRequest,
@@ -11,11 +11,10 @@ export async function GET(
       return NextResponse.json({ error: 'Missing userId' }, { status: 400 });
     }
 
-    if (!adminDb) {
+    const db = getAdminDb();
+    if (!db) {
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
-
-    const db = adminDb;
     const userDoc = await db.collection('users').doc(userId).get();
     const userProjectIds: string[] = userDoc.data()?.projectIds || [];
 
