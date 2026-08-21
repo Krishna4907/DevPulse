@@ -68,9 +68,10 @@ export async function POST(
     );
 
     // 3. Update project metadata
+    const updatedMemberIds = Array.from(new Set([...memberIds, userId]));
     batch.update(projRef, {
-      memberCount: FieldValue.increment(1),
-      memberIds: FieldValue.arrayUnion(userId),
+      memberCount: updatedMemberIds.length,
+      memberIds: updatedMemberIds,
     });
 
     await batch.commit();

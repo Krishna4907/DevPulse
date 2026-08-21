@@ -140,11 +140,12 @@ export default function ProjectPage() {
     };
   }, [projectId]);
 
-  // Check if current user is a member
+  // Check if current user is a member or leader
   const currentMember = user ? members.find((m) => m.userId === user.uid) : undefined;
   const isMember = !!currentMember;
+  const isLeader = Boolean(user && (project?.leaderId === user.uid || currentMember?.role === 'leader'));
   const maxCapacity = project?.maxMembers || 4;
-  const currentMemberCount = project?.memberCount || members.length;
+  const currentMemberCount = members.length > 0 ? members.length : (project?.memberCount || 1);
   const isProjectFull = currentMemberCount >= maxCapacity;
 
   // Control onboarding modal visibility (only for members who haven't calibrated skills)
@@ -366,8 +367,9 @@ export default function ProjectPage() {
     }
   };
 
-  // Open Assignment modal and prepare parameters
+  // Open Assignment modal and prepare parameters (Team Leader only)
   const openAssignModal = (task: Task) => {
+    if (!isLeader) return;
     setSelectedTask(task);
     setAssigneeId('');
     setPartnerId('');
@@ -769,7 +771,7 @@ export default function ProjectPage() {
                                     {partner ? ` + ${partner.name}` : ''}
                                   </span>
                                 </div>
-                              ) : (
+                              ) : isLeader ? (
                                 <button
                                   onClick={() => openAssignModal(task)}
                                   className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 flex items-center gap-1 hover:underline transition-colors cursor-pointer"
@@ -789,6 +791,8 @@ export default function ProjectPage() {
                                   </svg>
                                   <span>Assign Task</span>
                                 </button>
+                              ) : (
+                                <span className="text-[10px] text-zinc-500 italic">Unassigned</span>
                               )}
                             </div>
 
