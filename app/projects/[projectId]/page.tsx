@@ -370,9 +370,43 @@ export default function ProjectPage() {
   // Open Assignment modal and prepare parameters (Team Leader only)
   const openAssignModal = (task: Task) => {
     if (!isLeader) return;
+
+    // Calculate done tasks per member in this project that share at least one skill
+    const taskHistory: Record<string, number> = {};
+    members.forEach((m) => {
+      const completedCount = tasks.filter(
+        (t) =>
+          t.status === 'done' &&
+          (t.assigneeId === m.userId || t.partnerId === m.userId) &&
+          t.skills.some((s) => task.skills.includes(s))
+      ).length;
+      taskHistory[m.userId] = completedCount;
+    });
+
+    const scored = scoreMembers(members, task.skills, { taskHistory, activeTasks: tasks });
     setSelectedTask(task);
-    setAssigneeId('');
-    setPartnerId('');
+
+    if (scored.length > 0) {
+      const topDriver = scored[0];
+      setAssigneeId(topDriver.memberId);
+
+      if (topDriver.taskType === 'overload') {
+        // Find Navigator: member with the most missing skills that this task covers
+        const navCandidates = members.filter((m) => m.userId !== topDriver.memberId);
+        const bestNav = navCandidates.sort((a, b) => {
+          const aMissing = task.skills.filter((s) => !(a.skills || []).includes(s)).length;
+          const bMissing = task.skills.filter((s) => !(b.skills || []).includes(s)).length;
+          return bMissing - aMissing;
+        })[0];
+        setPartnerId(bestNav ? bestNav.userId : '');
+      } else {
+        setPartnerId('');
+      }
+    } else {
+      setAssigneeId('');
+      setPartnerId('');
+    }
+
     setIsAssignOpen(true);
   };
 
@@ -380,7 +414,6 @@ export default function ProjectPage() {
   const getTaskScoredMembers = () => {
     if (!selectedTask) return [];
 
-    // Calculate done tasks per member in this project that share at least one skill
     const taskHistory: Record<string, number> = {};
     members.forEach((m) => {
       const completedCount = tasks.filter(
@@ -392,7 +425,7 @@ export default function ProjectPage() {
       taskHistory[m.userId] = completedCount;
     });
 
-    return scoreMembers(members, selectedTask.skills, taskHistory);
+    return scoreMembers(members, selectedTask.skills, { taskHistory, activeTasks: tasks });
   };
 
   const scoredMembersList = getTaskScoredMembers();
@@ -407,38 +440,62 @@ export default function ProjectPage() {
       const driverMatch = scoredMembersList.find((m) => m.memberId === assigneeId);
       const isOverload = driverMatch?.taskType === 'overload';
       const taskType = driverMatch?.taskType || 'safe';
+      const finalPartnerId = isOverload && partnerId ? partnerId : null;
 
-      const taskRef = doc(db, 'projects', projectId, 'tasks', selectedTask.id);
-      await updateDoc(taskRef, {
-        assigneeId,
-        partnerId: isOverload && partnerId ? partnerId : null,
-        type: taskType,
-        status: 'todo',
+      const driverMissing = driverMatch?.missingSkills || [];
+      const partnerMember = members.find((m) => m.userId === finalPartnerId);
+      const partnerMissing = partnerMember
+        ? selectedTask.skills.filter((s) => !(partnerMember.skills || []).includes(s))
+        : [];
+
+      // 1. Update via Server API
+      await fetch(`/api/projects/${projectId}/tasks/${selectedTask.id}/assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assigneeId,
+          partnerId: finalPartnerId,
+          type: taskType,
+          missingSkills: driverMissing,
+          partnerMissingSkills: partnerMissing,
+        }),
       });
 
-      // Update assignee pending skills
-      if (driverMatch && driverMatch.missingSkills.length > 0) {
-        const assigneeMember = members.find((m) => m.userId === assigneeId);
-        if (assigneeMember) {
-          const currentPending = assigneeMember.pendingSkills || [];
-          const updatedPending = Array.from(new Set([...currentPending, ...driverMatch.missingSkills]));
-          const memberRef = doc(db, 'projects', projectId, 'members', assigneeId);
-          await updateDoc(memberRef, { pendingSkills: updatedPending });
-        }
-      }
+      // 2. Local reactive state update
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === selectedTask.id
+            ? {
+                ...t,
+                assigneeId,
+                partnerId: finalPartnerId,
+                type: taskType,
+              }
+            : t
+        )
+      );
 
-      // Update partner pending skills (if any match is overload and navigator is selected)
-      if (isOverload && partnerId) {
-        const partnerScored = scoredMembersList.find((m) => m.memberId === partnerId);
-        if (partnerScored && partnerScored.missingSkills.length > 0) {
-          const partnerMember = members.find((m) => m.userId === partnerId);
-          if (partnerMember) {
-            const currentPending = partnerMember.pendingSkills || [];
-            const updatedPending = Array.from(new Set([...currentPending, ...partnerScored.missingSkills]));
-            const partnerRef = doc(db, 'projects', projectId, 'members', partnerId);
-            await updateDoc(partnerRef, { pendingSkills: updatedPending });
-          }
-        }
+      // Update members pendingSkills locally
+      if (driverMissing.length > 0 || partnerMissing.length > 0) {
+        setMembers((prev) =>
+          prev.map((m) => {
+            if (m.userId === assigneeId && driverMissing.length > 0) {
+              const currentPending = m.pendingSkills || [];
+              return {
+                ...m,
+                pendingSkills: Array.from(new Set([...currentPending, ...driverMissing])),
+              };
+            }
+            if (m.userId === finalPartnerId && partnerMissing.length > 0) {
+              const currentPending = m.pendingSkills || [];
+              return {
+                ...m,
+                pendingSkills: Array.from(new Set([...currentPending, ...partnerMissing])),
+              };
+            }
+            return m;
+          })
+        );
       }
 
       setIsAssignOpen(false);
@@ -704,7 +761,7 @@ export default function ProjectPage() {
                       return (
                         <div
                           key={task.id}
-                          className="bg-zinc-900/40 border border-zinc-800/80 hover:border-zinc-700/80 p-4 rounded-xl shadow-md transition-all flex flex-col gap-3 group text-left"
+                          className="bg-zinc-900/40 border border-zinc-800/80 hover:border-zinc-700/80 p-4 rounded-xl shadow-md transition-all flex flex-col gap-3 group text-left relative"
                         >
                           <div>
                             <div className="flex justify-between items-start gap-2">
@@ -726,7 +783,15 @@ export default function ProjectPage() {
                                 </span>
                               )}
                             </div>
-                            <p className="text-zinc-400 text-xs mt-1.5 line-clamp-2">
+
+                            {/* Git Branch Name in Monospace Font */}
+                            <div className="mt-1.5">
+                              <span className="font-mono text-[10px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-800/80 inline-block truncate max-w-full">
+                                {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
+                              </span>
+                            </div>
+
+                            <p className="text-zinc-400 text-xs mt-2 line-clamp-2">
                               {task.description || 'No description provided.'}
                             </p>
                           </div>
@@ -737,7 +802,7 @@ export default function ProjectPage() {
                               {task.skills.map((skill, sIdx) => (
                                 <span
                                   key={sIdx}
-                                  className="bg-zinc-800 text-zinc-500 border border-zinc-800/60 px-1.5 py-0.5 rounded-md text-[9px]"
+                                  className="bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded-md text-[9px] font-medium"
                                 >
                                   {skill}
                                 </span>
@@ -747,52 +812,63 @@ export default function ProjectPage() {
 
                           {/* Assignee / Partner information */}
                           <div className="flex items-center justify-between border-t border-zinc-800/40 pt-3 mt-1">
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-2">
                               {task.assigneeId ? (
-                                <div className="flex -space-x-1.5 items-center">
-                                  {assignee?.image && (
-                                    <img
-                                      src={assignee.image}
-                                      alt={assignee.name}
-                                      title={`Driver: ${assignee.name}`}
-                                      className="h-5.5 w-5.5 rounded-full border border-zinc-800"
-                                    />
-                                  )}
-                                  {partner?.image && (
-                                    <img
-                                      src={partner.image}
-                                      alt={partner.name}
-                                      title={`Navigator: ${partner.name}`}
-                                      className="h-5.5 w-5.5 rounded-full border border-zinc-800"
-                                    />
-                                  )}
-                                  <span className="text-[10px] text-zinc-400 ml-2 font-medium">
+                                <div className="flex items-center gap-1.5">
+                                  <div className="flex -space-x-1.5 items-center">
+                                    {assignee?.image ? (
+                                      <img
+                                        src={assignee.image}
+                                        alt={assignee.name}
+                                        title={`Driver: ${assignee.name}`}
+                                        className="h-6 w-6 rounded-full border border-zinc-800"
+                                      />
+                                    ) : (
+                                      <div
+                                        title={`Driver: ${assignee?.name || 'Developer'}`}
+                                        className="h-6 w-6 rounded-full bg-violet-600/30 text-violet-300 border border-violet-500/30 flex items-center justify-center text-[10px] font-bold"
+                                      >
+                                        {assignee?.name ? assignee.name[0] : 'D'}
+                                      </div>
+                                    )}
+                                    {partner && (
+                                      partner.image ? (
+                                        <img
+                                          src={partner.image}
+                                          alt={partner.name}
+                                          title={`Navigator: ${partner.name}`}
+                                          className="h-6 w-6 rounded-full border border-zinc-800"
+                                        />
+                                      ) : (
+                                        <div
+                                          title={`Navigator: ${partner.name || 'Partner'}`}
+                                          className="h-6 w-6 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold"
+                                        >
+                                          {partner.name ? partner.name[0] : 'N'}
+                                        </div>
+                                      )
+                                    )}
+                                  </div>
+                                  <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[100px]">
                                     {assignee?.name}
                                     {partner ? ` + ${partner.name}` : ''}
                                   </span>
                                 </div>
-                              ) : isLeader ? (
+                              ) : (
+                                <span className="text-[10px] text-zinc-500 italic bg-zinc-950/60 border border-zinc-800/80 px-2 py-0.5 rounded">
+                                  Unassigned
+                                </span>
+                              )}
+
+                              {/* Leader Assign / Reassign Button */}
+                              {isLeader && (
                                 <button
                                   onClick={() => openAssignModal(task)}
-                                  className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 flex items-center gap-1 hover:underline transition-colors cursor-pointer"
+                                  className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 hover:underline transition-colors flex items-center gap-0.5 cursor-pointer ml-1"
+                                  title={task.assigneeId ? "Reassign Task" : "Assign Task"}
                                 >
-                                  <svg
-                                    className="h-3 w-3"
-                                    fill="none"
-                                    viewBox="0 0 24 24"
-                                    stroke="currentColor"
-                                    strokeWidth={2.5}
-                                  >
-                                    <path
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                      d="M18 7.5v3m0 0v3m0-3h3m-3 0h-3m-2.25-4.125a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0ZM3 19.235v-.11a6.375 6.375 0 0 1 12.75 0v.109A12.318 12.318 0 0 1 9.374 21c-2.331 0-4.512-.645-6.374-1.766Z"
-                                    />
-                                  </svg>
-                                  <span>Assign Task</span>
+                                  <span>{task.assigneeId ? 'Reassign' : 'Assign'}</span>
                                 </button>
-                              ) : (
-                                <span className="text-[10px] text-zinc-500 italic">Unassigned</span>
                               )}
                             </div>
 
@@ -1140,7 +1216,7 @@ export default function ProjectPage() {
 
       {/* TASK ASSIGNMENT MODAL */}
       {isAssignOpen && selectedTask && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-md animate-fadeIn">
           <div className="relative w-full max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl flex flex-col max-h-[90vh] overflow-y-auto">
             {/* Close Button */}
             <button
@@ -1155,60 +1231,95 @@ export default function ProjectPage() {
               </svg>
             </button>
 
-            <h3 className="text-2xl font-bold text-white mb-2">Assign Task</h3>
-            <p className="text-xs text-zinc-500 mb-6">
-              Task requires: {selectedTask.skills.join(', ') || 'No skills requested'}
-            </p>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="bg-violet-500/10 text-violet-400 border border-violet-500/20 text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                Scoring Engine
+              </span>
+              <h3 className="text-xl font-bold text-white">Assign Task</h3>
+            </div>
+            
+            <p className="text-sm font-semibold text-zinc-200 mt-1">{selectedTask.title}</p>
+            <div className="flex flex-wrap gap-1.5 mt-2 mb-5">
+              <span className="text-xs text-zinc-500 mr-1 self-center">Required Skills:</span>
+              {selectedTask.skills.map((s) => (
+                <span key={s} className="bg-zinc-800 text-zinc-300 border border-zinc-700 px-2 py-0.5 rounded text-xs font-medium">
+                  {s}
+                </span>
+              ))}
+              {selectedTask.skills.length === 0 && (
+                <span className="text-xs text-zinc-600 italic">No specific skills requested</span>
+              )}
+            </div>
 
             {/* Recommendation list */}
-            <div className="flex flex-col gap-4 max-h-[40vh] overflow-y-auto pr-1 mb-6">
+            <div className="flex flex-col gap-3.5 max-h-[42vh] overflow-y-auto pr-1 mb-5 scrollbar-thin">
               {scoredMembersList.map((scored) => {
                 const memberDetails = members.find((m) => m.userId === scored.memberId);
-                const isSelectedDriver = assigneeId === scored.memberId;
+                const isSelected = assigneeId === scored.memberId;
 
                 return (
                   <div
                     key={scored.memberId}
                     onClick={() => {
                       setAssigneeId(scored.memberId);
-                      // Clear partner if match type is not overload
-                      if (scored.taskType !== 'overload') {
+                      if (scored.taskType === 'overload') {
+                        // Auto suggest complementary partner
+                        const navCandidates = members.filter((m) => m.userId !== scored.memberId);
+                        const bestNav = navCandidates.sort((a, b) => {
+                          const aMissing = selectedTask.skills.filter((s) => !(a.skills || []).includes(s)).length;
+                          const bMissing = selectedTask.skills.filter((s) => !(b.skills || []).includes(s)).length;
+                          return bMissing - aMissing;
+                        })[0];
+                        setPartnerId(bestNav ? bestNav.userId : '');
+                      } else {
                         setPartnerId('');
                       }
                     }}
-                    className={`flex flex-col gap-3 p-4 rounded-xl border transition-all cursor-pointer text-left ${
-                      isSelectedDriver
-                        ? 'bg-violet-600/10 border-violet-500/50 hover:bg-violet-600/15'
-                        : 'bg-zinc-950/40 border-zinc-800 hover:bg-zinc-950/60 hover:border-zinc-700'
+                    className={`flex flex-col gap-2.5 p-3.5 rounded-xl border transition-all cursor-pointer text-left ${
+                      isSelected
+                        ? 'bg-violet-600/10 border-violet-500/60 shadow-[0_0_20px_rgba(124,58,237,0.15)] ring-1 ring-violet-500/40'
+                        : 'bg-zinc-950/40 border-zinc-800/80 hover:bg-zinc-950/70 hover:border-zinc-700'
                     }`}
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="flex items-center gap-2.5">
+                        <div className={`h-4 w-4 rounded-full border flex items-center justify-center ${isSelected ? 'border-violet-500 bg-violet-600' : 'border-zinc-700'}`}>
+                          {isSelected && <div className="h-1.5 w-1.5 rounded-full bg-white"></div>}
+                        </div>
                         {memberDetails?.image ? (
                           <img src={memberDetails.image} alt={scored.memberName} className="h-8 w-8 rounded-full border border-zinc-800" />
                         ) : (
                           <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white">
-                            {scored.memberName[0]}
+                            {scored.memberName ? scored.memberName[0] : 'U'}
                           </div>
                         )}
                         <div>
-                          <span className="font-bold text-sm text-zinc-200">{scored.memberName}</span>
-                          <span className="text-[10px] text-zinc-500 block">Suitability Match</span>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold text-sm text-zinc-200">{scored.memberName}</span>
+                            <span className="text-[9px] text-zinc-500 uppercase tracking-wider font-semibold">
+                              {memberDetails?.role}
+                            </span>
+                          </div>
+                          <span className="text-[10px] text-zinc-500 block">Match Calibration</span>
                         </div>
                       </div>
 
                       <div className="flex items-center gap-2">
                         {/* Task Type Tag */}
                         <span
-                          className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
+                          className={`px-2 py-0.5 rounded-md text-[9px] font-bold uppercase tracking-wider ${
                             scored.taskType === 'safe'
-                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/20'
+                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
                               : scored.taskType === 'stretch'
-                              ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
-                              : 'bg-amber-500/15 text-amber-400 border border-amber-500/20'
+                              ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30'
+                              : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
                           }`}
                         >
-                          {scored.taskType}
+                          {scored.taskType === 'safe'
+                            ? 'Safe'
+                            : scored.taskType === 'stretch'
+                            ? 'Stretch'
+                            : 'Overload — Pair Required'}
                         </span>
                         <span className="font-mono text-xs font-bold text-violet-400">{scored.score}%</span>
                       </div>
@@ -1217,65 +1328,112 @@ export default function ProjectPage() {
                     {/* Progress suitability bar */}
                     <div className="h-2 w-full bg-zinc-900 rounded-full overflow-hidden">
                       <div
-                        className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 transition-all duration-300"
+                        className={`h-full transition-all duration-300 ${
+                          scored.taskType === 'safe'
+                            ? 'bg-emerald-500'
+                            : scored.taskType === 'stretch'
+                            ? 'bg-gradient-to-r from-violet-600 to-indigo-500'
+                            : 'bg-gradient-to-r from-amber-500 to-orange-500'
+                        }`}
                         style={{ width: `${scored.score}%` }}
                       ></div>
                     </div>
 
                     {/* Matched vs Missing Skills indicators */}
-                    <div className="flex flex-wrap gap-x-3 gap-y-1.5 text-[10px] text-zinc-500">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
                       {scored.matchedSkills.length > 0 && (
-                        <div>
-                          <span className="text-emerald-500 font-semibold">Matched:</span>{' '}
-                          {scored.matchedSkills.join(', ')}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-emerald-400 text-[10px] font-semibold">Matched:</span>
+                          {scored.matchedSkills.map((s) => (
+                            <span key={s} className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[10px] font-medium">
+                              {s}
+                            </span>
+                          ))}
                         </div>
                       )}
                       {scored.missingSkills.length > 0 && (
-                        <div>
-                          <span className="text-rose-400 font-semibold">Missing:</span>{' '}
-                          {scored.missingSkills.join(', ')}
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="text-zinc-500 text-[10px] font-semibold">Missing:</span>
+                          {scored.missingSkills.map((s) => (
+                            <span key={s} className="bg-zinc-800 text-zinc-400 border border-zinc-700/60 px-1.5 py-0.5 rounded text-[10px] font-medium">
+                              {s}
+                            </span>
+                          ))}
                         </div>
                       )}
                     </div>
+
+                    {/* Hard Rule Warning Alert */}
+                    {scored.warningMessage && (
+                      <div className="flex items-center gap-1.5 text-[10px] text-amber-400/90 font-medium bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg mt-0.5">
+                        <svg className="h-3 w-3 text-amber-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                        </svg>
+                        <span>{scored.warningMessage}</span>
+                      </div>
+                    )}
                   </div>
                 );
               })}
             </div>
 
-            {/* Overload double-selectors option */}
+            {/* Overload Pairing Section (Driver + Navigator) */}
             {selectedDriverMatch && selectedDriverMatch.taskType === 'overload' && (
-              <div className="flex flex-col gap-2 p-4 bg-zinc-950/60 border border-zinc-800 rounded-xl mb-6 text-left animate-slideDown">
+              <div className="flex flex-col gap-3 p-4 bg-amber-500/5 border border-amber-500/20 rounded-xl mb-5 text-left animate-slideDown">
                 <div className="flex items-center gap-2 text-amber-400">
-                  <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
                     <path
                       strokeLinecap="round"
                       strokeLinejoin="round"
-                      d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"
+                      d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z"
                     />
                   </svg>
-                  <h4 className="font-bold text-sm">Overload Task Calibration</h4>
+                  <h4 className="font-bold text-sm">Overload Task Calibration (Pair Programming)</h4>
                 </div>
-                <p className="text-xs text-zinc-500 mt-0.5">
-                  This task represents an overload for {selectedDriverMatch.memberName} (missing 2+ skills). 
-                  Assign a Navigator (partner) to support them.
+                <p className="text-xs text-zinc-400">
+                  This task represents an overload (missing 2+ skills). Assign a <strong className="text-white">Driver</strong> (Lead developer) and a <strong className="text-white">Navigator</strong> (Partner learning missing skills).
                 </p>
 
-                <div className="mt-3 flex flex-col gap-1.5">
-                  <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider">Navigator (Partner)</label>
-                  <select
-                    value={partnerId}
-                    onChange={(e) => setPartnerId(e.target.value)}
-                    className="bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none px-3 py-2 rounded-lg text-xs text-white"
-                  >
-                    <option value="">-- Choose Navigator (Unassigned) --</option>
-                    {members
-                      .filter((m) => m.userId !== assigneeId)
-                      .map((m) => (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-1">
+                  <div>
+                    <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider block mb-1">
+                      1. Driver (Lead)
+                    </label>
+                    <select
+                      value={assigneeId}
+                      onChange={(e) => setAssigneeId(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none px-3 py-2 rounded-lg text-xs text-white"
+                    >
+                      {members.map((m) => (
                         <option key={m.id} value={m.userId}>
-                          {m.name}
+                          {m.name} ({scoredMembersList.find((s) => s.memberId === m.userId)?.score || 0}% match)
                         </option>
                       ))}
-                  </select>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-semibold text-zinc-400 uppercase tracking-wider block mb-1">
+                      2. Navigator (Partner)
+                    </label>
+                    <select
+                      value={partnerId}
+                      onChange={(e) => setPartnerId(e.target.value)}
+                      className="w-full bg-zinc-950 border border-zinc-800 focus:border-violet-500 outline-none px-3 py-2 rounded-lg text-xs text-white"
+                    >
+                      <option value="">-- Choose Navigator --</option>
+                      {members
+                        .filter((m) => m.userId !== assigneeId)
+                        .map((m) => {
+                          const toLearn = selectedTask.skills.filter((s) => !(m.skills || []).includes(s));
+                          return (
+                            <option key={m.id} value={m.userId}>
+                              {m.name} (Learns: {toLearn.length > 0 ? toLearn.join(', ') : 'None'})
+                            </option>
+                          );
+                        })}
+                    </select>
+                  </div>
                 </div>
               </div>
             )}
@@ -1287,14 +1445,14 @@ export default function ProjectPage() {
                   setIsAssignOpen(false);
                   setSelectedTask(null);
                 }}
-                className="px-4 py-2 border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-white rounded-xl text-xs font-semibold transition-colors"
+                className="px-4 py-2 border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 onClick={handleConfirmAssignment}
                 disabled={assignSubmitting || !assigneeId}
-                className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] hover:shadow-[0_0_15px_rgba(124,58,237,0.2)]"
+                className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] hover:shadow-[0_0_15px_rgba(124,58,237,0.2)] cursor-pointer"
               >
                 {assignSubmitting ? 'Assigning...' : 'Confirm Assignment'}
               </button>

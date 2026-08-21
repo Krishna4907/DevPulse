@@ -15,11 +15,12 @@ export async function GET(
       return NextResponse.json({ error: 'Admin DB not initialized' }, { status: 500 });
     }
 
-    const userDoc = await adminDb.collection('users').doc(userId).get();
+    const db = adminDb;
+    const userDoc = await db.collection('users').doc(userId).get();
     const userProjectIds: string[] = userDoc.data()?.projectIds || [];
 
     // Query projects where memberIds array contains userId as dual-backup
-    const memberProjectsSnap = await adminDb
+    const memberProjectsSnap = await db
       .collection('projects')
       .where('memberIds', 'array-contains', userId)
       .get();
@@ -34,7 +35,7 @@ export async function GET(
     const projects = await Promise.all(
       allProjectIds.map(async (pid) => {
         try {
-          const docSnap = await adminDb.collection('projects').doc(pid).get();
+          const docSnap = await db.collection('projects').doc(pid).get();
           if (docSnap.exists) {
             const data = docSnap.data();
             return {
