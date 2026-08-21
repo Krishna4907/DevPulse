@@ -24,6 +24,7 @@ export default function ProjectPage() {
   const [loadingTasks, setLoadingTasks] = useState(true);
   const [joining, setJoining] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [isTeamPanelOpen, setIsTeamPanelOpen] = useState(true);
 
   // Modal controls
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -717,279 +718,379 @@ export default function ProjectPage() {
         </div>
       ) : (
         /* CASE A: User IS already a member -> Kanban Board & Team Panel */
-        <div className="flex-1 max-w-[1400px] w-full mx-auto px-6 py-8 flex flex-col lg:flex-row gap-8">
+        <div className="flex-1 w-full max-w-[1800px] mx-auto px-4 sm:px-6 lg:px-8 py-6 flex flex-col gap-6">
           
-          {/* LEFT (70%): Kanban Board */}
-          <div className="flex-1 lg:w-[70%] flex flex-col">
-            <div className="flex items-center justify-between mb-6">
-            <h2 className="text-xl font-bold text-white tracking-tight">Kanban Board</h2>
-            <p className="text-xs text-zinc-500">Real-time task synchronization enabled</p>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 flex-1">
-            {/* Columns definition */}
-            {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
-              const statusTasks = tasksByStatus(status);
-              const columnName =
-                status === 'todo'
-                  ? 'To Do'
-                  : status === 'inprogress'
-                  ? 'In Progress'
-                  : status === 'inreview'
-                  ? 'In Review'
-                  : 'Done';
-
-              return (
-                <div
-                  key={status}
-                  className="flex flex-col bg-zinc-900/10 border border-zinc-800/80 rounded-2xl p-4 min-h-[400px]"
-                >
-                  {/* Column Header */}
-                  <div className="flex items-center justify-between mb-4 border-b border-zinc-800/60 pb-3">
-                    <h3 className="font-bold text-sm text-zinc-300">{columnName}</h3>
-                    <span className="bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded-full text-[10px] font-bold">
-                      {statusTasks.length}
-                    </span>
-                  </div>
-
-                  {/* Tasks list */}
-                  <div className="flex flex-col gap-3 flex-1 overflow-y-auto max-h-[60vh] scrollbar-thin">
-                    {statusTasks.map((task) => {
-                      const assignee = members.find((m) => m.userId === task.assigneeId);
-                      const partner = members.find((m) => m.userId === task.partnerId);
-
-                      return (
-                        <div
-                          key={task.id}
-                          className="bg-zinc-900/40 border border-zinc-800/80 hover:border-zinc-700/80 p-4 rounded-xl shadow-md transition-all flex flex-col gap-3 group text-left relative"
-                        >
-                          <div>
-                            <div className="flex justify-between items-start gap-2">
-                              <h4 className="font-bold text-white text-sm line-clamp-2 leading-snug">
-                                {task.title}
-                              </h4>
-                              {/* Task Type Badge */}
-                              {task.assigneeId && (
-                                <span
-                                  className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
-                                    task.type === 'safe'
-                                      ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                                      : task.type === 'stretch'
-                                      ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
-                                      : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                  }`}
-                                >
-                                  {task.type}
-                                </span>
-                              )}
-                            </div>
-
-                            {/* Git Branch Name in Monospace Font */}
-                            <div className="mt-1.5">
-                              <span className="font-mono text-[10px] text-zinc-500 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-800/80 inline-block truncate max-w-full">
-                                {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
-                              </span>
-                            </div>
-
-                            <p className="text-zinc-400 text-xs mt-2 line-clamp-2">
-                              {task.description || 'No description provided.'}
-                            </p>
-                          </div>
-
-                          {/* Skill Tags */}
-                          {task.skills.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
-                              {task.skills.map((skill, sIdx) => (
-                                <span
-                                  key={sIdx}
-                                  className="bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded-md text-[9px] font-medium"
-                                >
-                                  {skill}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-
-                          {/* Assignee / Partner information */}
-                          <div className="flex items-center justify-between border-t border-zinc-800/40 pt-3 mt-1">
-                            <div className="flex items-center gap-2">
-                              {task.assigneeId ? (
-                                <div className="flex items-center gap-1.5">
-                                  <div className="flex -space-x-1.5 items-center">
-                                    {assignee?.image ? (
-                                      <img
-                                        src={assignee.image}
-                                        alt={assignee.name}
-                                        title={`Driver: ${assignee.name}`}
-                                        className="h-6 w-6 rounded-full border border-zinc-800"
-                                      />
-                                    ) : (
-                                      <div
-                                        title={`Driver: ${assignee?.name || 'Developer'}`}
-                                        className="h-6 w-6 rounded-full bg-violet-600/30 text-violet-300 border border-violet-500/30 flex items-center justify-center text-[10px] font-bold"
-                                      >
-                                        {assignee?.name ? assignee.name[0] : 'D'}
-                                      </div>
-                                    )}
-                                    {partner && (
-                                      partner.image ? (
-                                        <img
-                                          src={partner.image}
-                                          alt={partner.name}
-                                          title={`Navigator: ${partner.name}`}
-                                          className="h-6 w-6 rounded-full border border-zinc-800"
-                                        />
-                                      ) : (
-                                        <div
-                                          title={`Navigator: ${partner.name || 'Partner'}`}
-                                          className="h-6 w-6 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold"
-                                        >
-                                          {partner.name ? partner.name[0] : 'N'}
-                                        </div>
-                                      )
-                                    )}
-                                  </div>
-                                  <span className="text-[10px] text-zinc-400 font-medium truncate max-w-[100px]">
-                                    {assignee?.name}
-                                    {partner ? ` + ${partner.name}` : ''}
-                                  </span>
-                                </div>
-                              ) : (
-                                <span className="text-[10px] text-zinc-500 italic bg-zinc-950/60 border border-zinc-800/80 px-2 py-0.5 rounded">
-                                  Unassigned
-                                </span>
-                              )}
-
-                              {/* Leader Assign / Reassign Button */}
-                              {isLeader && (
-                                <button
-                                  onClick={() => openAssignModal(task)}
-                                  className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 hover:underline transition-colors flex items-center gap-0.5 cursor-pointer ml-1"
-                                  title={task.assigneeId ? "Reassign Task" : "Assign Task"}
-                                >
-                                  <span>{task.assigneeId ? 'Reassign' : 'Assign'}</span>
-                                </button>
-                              )}
-                            </div>
-
-                            {/* Status mover selection */}
-                            <select
-                              value={task.status}
-                              onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value as Task['status'])}
-                              className="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white px-2 py-1 rounded outline-none transition-colors"
-                            >
-                              <option value="todo">To Do</option>
-                              <option value="inprogress">In Progress</option>
-                              <option value="inreview">In Review</option>
-                              <option value="done">Done</option>
-                            </select>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Add Task Trigger (Only in To Do column) */}
-                  {status === 'todo' && (
-                    <button
-                      onClick={openAddTaskModal}
-                      className="mt-4 flex w-full items-center justify-center gap-1.5 border border-dashed border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/10 rounded-xl py-2.5 text-xs text-zinc-500 hover:text-zinc-300 transition-all font-semibold cursor-pointer"
-                    >
-                      <svg
-                        className="h-3.5 w-3.5"
-                        fill="none"
-                        viewBox="0 0 24 24"
-                        stroke="currentColor"
-                        strokeWidth={2.5}
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                      </svg>
-                      <span>Add Task</span>
-                    </button>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* RIGHT (30%): Team Panel */}
-        <div className="w-full lg:w-[30%] bg-zinc-900/10 border border-zinc-800/80 rounded-2xl p-6 flex flex-col self-start">
-          <div className="border-b border-zinc-800 pb-4 mb-6 flex items-center justify-between">
+          {/* Top Action & View Bar */}
+          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800/80 pb-4">
             <div>
-              <h3 className="text-lg font-bold text-white">Team Members</h3>
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-bold text-white tracking-tight">Kanban Board</h2>
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+                  Live Sync
+                </span>
+              </div>
               <p className="text-xs text-zinc-500 mt-0.5">
-                {currentMemberCount} of {maxCapacity} slots filled
+                Organize, calibrate, and track real-time team progress
               </p>
             </div>
 
-            <button
-              onClick={handleCopyInviteLink}
-              className="text-[11px] font-semibold bg-violet-600/10 text-violet-300 border border-violet-500/20 hover:bg-violet-600/20 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
-              title="Copy project invite link"
-            >
-              <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
-              </svg>
-              <span>{copiedLink ? 'Copied' : 'Invite'}</span>
-            </button>
+            <div className="flex items-center gap-2.5">
+              {/* Quick Add Task */}
+              <button
+                onClick={openAddTaskModal}
+                className="flex items-center gap-1.5 px-3.5 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] cursor-pointer"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                </svg>
+                <span>New Task</span>
+              </button>
+
+              {/* Toggle Team Panel Button */}
+              <button
+                onClick={() => setIsTeamPanelOpen(!isTeamPanelOpen)}
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold border transition-all cursor-pointer ${
+                  isTeamPanelOpen
+                    ? 'bg-zinc-800/90 text-white border-zinc-700 hover:bg-zinc-800'
+                    : 'bg-zinc-900/60 hover:bg-zinc-800 text-zinc-400 hover:text-white border-zinc-800'
+                }`}
+                title={isTeamPanelOpen ? "Collapse Team Panel" : "Expand Team Panel"}
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+                </svg>
+                <span>Team ({members.length})</span>
+                <span className="text-[10px] text-zinc-500 ml-0.5">{isTeamPanelOpen ? '▾' : '▸'}</span>
+              </button>
+            </div>
           </div>
 
-          <div className="flex flex-col gap-5">
-            {members.map((member) => (
-              <div key={member.id} className="flex gap-3 items-start border-b border-zinc-900 pb-4 last:border-0 last:pb-0">
-                {member.image ? (
-                  <img src={member.image} alt={member.name} className="h-9 w-9 rounded-full border border-zinc-800 mt-0.5" />
-                ) : (
-                  <div className="h-9 w-9 rounded-full bg-zinc-800 flex items-center justify-center text-sm font-semibold text-white mt-0.5">
-                    {member.name ? member.name[0] : 'U'}
-                  </div>
-                )}
+          {/* Main Content: Flexible Board & Collapsible Team Panel */}
+          <div className="flex-1 flex flex-col lg:flex-row gap-6 w-full items-start">
+            
+            {/* KANBAN BOARD CONTAINER (Flexes to fill 100% when Team Panel is closed) */}
+            <div className="flex-1 w-full min-w-0 flex flex-col">
+              <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
+                {/* Columns definition */}
+                {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
+                  const statusTasks = tasksByStatus(status);
+                  const columnName =
+                    status === 'todo'
+                      ? 'To Do'
+                      : status === 'inprogress'
+                      ? 'In Progress'
+                      : status === 'inreview'
+                      ? 'In Review'
+                      : 'Done';
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-bold text-sm text-zinc-200 line-clamp-1">{member.name || 'Developer'}</span>
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
-                        member.role === 'leader'
-                          ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
-                          : 'bg-zinc-800 text-zinc-400'
-                      }`}
+                  const columnColor =
+                    status === 'todo'
+                      ? 'border-zinc-800/80 bg-zinc-900/20'
+                      : status === 'inprogress'
+                      ? 'border-blue-900/30 bg-blue-950/10'
+                      : status === 'inreview'
+                      ? 'border-amber-900/30 bg-amber-950/10'
+                      : 'border-emerald-900/30 bg-emerald-950/10';
+
+                  const badgeColor =
+                    status === 'todo'
+                      ? 'bg-zinc-800 text-zinc-300'
+                      : status === 'inprogress'
+                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                      : status === 'inreview'
+                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+
+                  return (
+                    <div
+                      key={status}
+                      className={`flex flex-col border rounded-2xl p-4 min-h-[420px] transition-all backdrop-blur-sm ${columnColor}`}
                     >
-                      {member.role}
-                    </span>
+                      {/* Column Header */}
+                      <div className="flex items-center justify-between mb-4 border-b border-zinc-800/60 pb-3">
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-sm text-zinc-200">{columnName}</h3>
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeColor}`}>
+                            {statusTasks.length}
+                          </span>
+                        </div>
+
+                        {status === 'todo' && (
+                          <button
+                            onClick={openAddTaskModal}
+                            className="text-zinc-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-zinc-800/60"
+                            title="Add task to To Do"
+                          >
+                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+
+                      {/* Tasks list with sleek dark scrollbar */}
+                      <div className="flex flex-col gap-3 flex-1 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
+                        {statusTasks.map((task) => {
+                          const assignee = members.find((m) => m.userId === task.assigneeId);
+                          const partner = members.find((m) => m.userId === task.partnerId);
+
+                          return (
+                            <div
+                              key={task.id}
+                              className="bg-zinc-900/70 border border-zinc-800 hover:border-zinc-700 p-4 rounded-xl shadow-lg transition-all flex flex-col gap-3 group text-left relative overflow-hidden"
+                            >
+                              <div className="min-w-0">
+                                <div className="flex justify-between items-start gap-2">
+                                  <h4 className="font-bold text-white text-sm line-clamp-2 leading-snug break-words">
+                                    {task.title}
+                                  </h4>
+                                  {/* Task Type Badge */}
+                                  {task.assigneeId && (
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider shrink-0 ${
+                                        task.type === 'safe'
+                                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                          : task.type === 'stretch'
+                                          ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30'
+                                          : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                                      }`}
+                                    >
+                                      {task.type}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Git Branch Name in Monospace Font */}
+                                <div className="mt-1.5">
+                                  <span
+                                    title={task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
+                                    className="font-mono text-[10px] text-zinc-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-850 block truncate max-w-full"
+                                  >
+                                    {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
+                                  </span>
+                                </div>
+
+                                <p className="text-zinc-400 text-xs mt-2 line-clamp-2 break-words">
+                                  {task.description || 'No description provided.'}
+                                </p>
+                              </div>
+
+                              {/* Skill Tags */}
+                              {task.skills.length > 0 && (
+                                <div className="flex flex-wrap gap-1">
+                                  {task.skills.map((skill, sIdx) => (
+                                    <span
+                                      key={sIdx}
+                                      className="bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded-md text-[9px] font-medium"
+                                    >
+                                      {skill}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+
+                              {/* Assignee / Partner information */}
+                              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/50 pt-3 mt-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {task.assigneeId ? (
+                                    <div className="flex items-center gap-1.5 min-w-0">
+                                      <div className="flex -space-x-1.5 items-center shrink-0">
+                                        {assignee?.image ? (
+                                          <img
+                                            src={assignee.image}
+                                            alt={assignee.name}
+                                            title={`Driver: ${assignee.name}`}
+                                            className="h-6 w-6 rounded-full border border-zinc-800"
+                                          />
+                                        ) : (
+                                          <div
+                                            title={`Driver: ${assignee?.name || 'Developer'}`}
+                                            className="h-6 w-6 rounded-full bg-violet-600/30 text-violet-300 border border-violet-500/30 flex items-center justify-center text-[10px] font-bold"
+                                          >
+                                            {assignee?.name ? assignee.name[0] : 'D'}
+                                          </div>
+                                        )}
+                                        {partner && (
+                                          partner.image ? (
+                                            <img
+                                              src={partner.image}
+                                              alt={partner.name}
+                                              title={`Navigator: ${partner.name}`}
+                                              className="h-6 w-6 rounded-full border border-zinc-800"
+                                            />
+                                          ) : (
+                                            <div
+                                              title={`Navigator: ${partner.name || 'Partner'}`}
+                                              className="h-6 w-6 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold"
+                                            >
+                                              {partner.name ? partner.name[0] : 'N'}
+                                            </div>
+                                          )
+                                        )}
+                                      </div>
+                                      <span className="text-[10px] text-zinc-300 font-medium truncate max-w-[90px]">
+                                        {assignee?.name}
+                                        {partner ? ` + ${partner.name}` : ''}
+                                      </span>
+                                    </div>
+                                  ) : (
+                                    <span className="text-[10px] text-zinc-500 italic bg-zinc-950/60 border border-zinc-800/80 px-2 py-0.5 rounded">
+                                      Unassigned
+                                    </span>
+                                  )}
+
+                                  {/* Leader Assign / Reassign Button */}
+                                  {isLeader && (
+                                    <button
+                                      onClick={() => openAssignModal(task)}
+                                      className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
+                                      title={task.assigneeId ? "Reassign Task" : "Assign Task"}
+                                    >
+                                      <span>{task.assigneeId ? 'Reassign' : 'Assign'}</span>
+                                    </button>
+                                  )}
+                                </div>
+
+                                {/* Status mover selection */}
+                                <select
+                                  value={task.status}
+                                  onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value as Task['status'])}
+                                  className="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white px-2 py-1 rounded outline-none transition-colors ml-auto"
+                                >
+                                  <option value="todo">To Do</option>
+                                  <option value="inprogress">In Progress</option>
+                                  <option value="inreview">In Review</option>
+                                  <option value="done">Done</option>
+                                </select>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {statusTasks.length === 0 && (
+                          <div className="flex flex-col items-center justify-center py-10 text-center text-zinc-600 border border-dashed border-zinc-800/60 rounded-xl">
+                            <span className="text-xs">No tasks</span>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Add Task Trigger (Only in To Do column) */}
+                      {status === 'todo' && (
+                        <button
+                          onClick={openAddTaskModal}
+                          className="mt-4 flex w-full items-center justify-center gap-1.5 border border-dashed border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/30 rounded-xl py-2.5 text-xs text-zinc-500 hover:text-zinc-300 transition-all font-semibold cursor-pointer"
+                        >
+                          <svg
+                            className="h-3.5 w-3.5"
+                            fill="none"
+                            viewBox="0 0 24 24"
+                            stroke="currentColor"
+                            strokeWidth={2.5}
+                          >
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                          </svg>
+                          <span>Add Task</span>
+                        </button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* RIGHT SIDE: Collapsible Team Panel */}
+            {isTeamPanelOpen && (
+              <div className="w-full lg:w-[320px] xl:w-[360px] bg-zinc-900/30 border border-zinc-800/80 rounded-2xl p-5 flex flex-col self-start shrink-0 backdrop-blur-md transition-all animate-fadeIn">
+                <div className="border-b border-zinc-800 pb-3 mb-5 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-base font-bold text-white">Team Members</h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      {currentMemberCount} of {maxCapacity} slots filled
+                    </p>
                   </div>
 
-                  {/* Skills tags */}
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {member.skills && member.skills.map((skill, skIdx) => (
-                      <span
-                        key={skIdx}
-                        className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium"
-                      >
-                        {skill}
-                      </span>
-                    ))}
-                    {member.pendingSkills && member.pendingSkills.map((pskill, pskIdx) => (
-                      <span
-                        key={`p-${pskIdx}`}
-                        className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium animate-pulse"
-                        title="Pending Acquisition (learning from assigned task)"
-                      >
-                        {pskill}*
-                      </span>
-                    ))}
-                    {(!member.skills || member.skills.length === 0) && (!member.pendingSkills || member.pendingSkills.length === 0) && (
-                      <span className="text-[10px] text-zinc-600 italic">No skills registered</span>
-                    )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleCopyInviteLink}
+                      className="text-[11px] font-semibold bg-violet-600/10 text-violet-300 border border-violet-500/20 hover:bg-violet-600/20 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                      title="Copy project invite link"
+                    >
+                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+                      </svg>
+                      <span>{copiedLink ? 'Copied' : 'Invite'}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setIsTeamPanelOpen(false)}
+                      className="text-zinc-500 hover:text-white p-1 rounded-lg transition-colors"
+                      title="Hide panel"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
+
+                <div className="flex flex-col gap-4">
+                  {members.map((member) => (
+                    <div key={member.id} className="flex gap-3 items-start border-b border-zinc-800/40 pb-3.5 last:border-0 last:pb-0">
+                      {member.image ? (
+                        <img src={member.image} alt={member.name} className="h-8 w-8 rounded-full border border-zinc-800 mt-0.5" />
+                      ) : (
+                        <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-white mt-0.5">
+                          {member.name ? member.name[0] : 'U'}
+                        </div>
+                      )}
+
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-xs text-zinc-200 truncate">{member.name || 'Developer'}</span>
+                          <span
+                            className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
+                              member.role === 'leader'
+                                ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
+                                : 'bg-zinc-800 text-zinc-400'
+                            }`}
+                          >
+                            {member.role}
+                          </span>
+                        </div>
+
+                        {/* Skills tags */}
+                        <div className="mt-1.5 flex flex-wrap gap-1">
+                          {member.skills && member.skills.map((skill, skIdx) => (
+                            <span
+                              key={skIdx}
+                              className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium"
+                            >
+                              {skill}
+                            </span>
+                          ))}
+                          {member.pendingSkills && member.pendingSkills.map((pskill, pskIdx) => (
+                            <span
+                              key={`p-${pskIdx}`}
+                              className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium animate-pulse"
+                              title="Pending Acquisition (learning from assigned task)"
+                            >
+                              {pskill}*
+                            </span>
+                          ))}
+                          {(!member.skills || member.skills.length === 0) && (!member.pendingSkills || member.pendingSkills.length === 0) && (
+                            <span className="text-[10px] text-zinc-600 italic">No skills registered</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
-            ))}
+            )}
           </div>
         </div>
-      </div>
-    )}
+      )}
 
       {/* SKILL ONBOARDING MODAL */}
       {isOnboardingOpen && (
