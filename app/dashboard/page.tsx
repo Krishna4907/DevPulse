@@ -221,11 +221,11 @@ export default function Dashboard() {
     setSubmitting(true);
 
     try {
-      // 10-Second Timeout promise
+      // 25-Second Timeout promise
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(
           () => reject(new Error('Failed to create project. Please try again (operation timed out).')),
-          10000
+          25000
         )
       );
 
