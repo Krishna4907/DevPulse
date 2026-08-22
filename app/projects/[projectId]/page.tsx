@@ -50,6 +50,14 @@ export default function ProjectPage() {
   const [partnerId, setPartnerId] = useState<string>('');
   const [assignSubmitting, setAssignSubmitting] = useState(false);
 
+  // Webhook Setup Modal state
+  const [isWebhookModalOpen, setIsWebhookModalOpen] = useState(false);
+  const [webhookUpdating, setWebhookUpdating] = useState(false);
+  const [copiedTaskId, setCopiedTaskId] = useState<string | null>(null);
+  const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
+  const [copiedWebhookSecret, setCopiedWebhookSecret] = useState(false);
+  const [copiedWebhookContentType, setCopiedWebhookContentType] = useState(false);
+
   // Redirect if not logged in
   useEffect(() => {
     if (!authLoading && !user) {
@@ -518,6 +526,24 @@ export default function ProjectPage() {
     }
   };
 
+  // Mark Webhook as Configured/Active in Firestore
+  const handleMarkWebhookActive = async () => {
+    setWebhookUpdating(true);
+    try {
+      const projectRef = doc(db, 'projects', projectId);
+      await updateDoc(projectRef, {
+        webhookConfigured: true,
+      });
+      setProject((prev) => (prev ? { ...prev, webhookConfigured: true } : prev));
+      setIsWebhookModalOpen(false);
+    } catch (err: any) {
+      console.error('Error configuring webhook:', err);
+      alert('Failed to update webhook status. Please try again.');
+    } finally {
+      setWebhookUpdating(false);
+    }
+  };
+
   // Helper selectors for cards mapping
   const tasksByStatus = (status: Task['status']) => {
     return tasks.filter((t) => t.status === status);
@@ -562,7 +588,7 @@ export default function ProjectPage() {
       <div className="absolute top-0 left-0 h-[300px] w-[300px] rounded-full bg-violet-600/5 blur-[80px] pointer-events-none"></div>
 
       {/* Header */}
-      <header className="z-10 border-b border-zinc-800 bg-zinc-900/20 backdrop-blur-md px-6 py-4 flex items-center justify-between">
+      <header className="z-10 border-b border-zinc-800 bg-zinc-900/20 backdrop-blur-md px-6 py-4 flex flex-wrap gap-4 items-center justify-between">
         <div className="flex items-center gap-3">
           <Link href="/dashboard" className="flex h-9 w-9 items-center justify-center rounded-lg bg-zinc-800 hover:bg-zinc-700 transition-colors">
             <svg
@@ -585,7 +611,39 @@ export default function ProjectPage() {
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Webhook Status Indicator */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl border bg-zinc-900/60 border-zinc-800 text-xs font-medium">
+            {project.webhookConfigured ? (
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span className="text-emerald-300 font-semibold">Webhook Active</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="h-2 w-2 rounded-full bg-zinc-500"></span>
+                <span className="text-zinc-400">Webhook Not Set Up</span>
+              </div>
+            )}
+          </div>
+
+          {/* Setup Webhook Button (Leader only) */}
+          {isLeader && (
+            <button
+              onClick={() => setIsWebhookModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-violet-600/20 hover:bg-violet-600/30 text-violet-300 border border-violet-500/30 hover:border-violet-500/50 transition-all cursor-pointer shadow-[0_0_15px_rgba(124,58,237,0.15)]"
+              title="Configure GitHub webhook for automated card moves"
+            >
+              <svg className="h-3.5 w-3.5 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z" />
+              </svg>
+              <span>Setup Webhook</span>
+            </button>
+          )}
+
           {/* Share Invite Link Button */}
           <button
             onClick={handleCopyInviteLink}
@@ -880,6 +938,29 @@ export default function ProjectPage() {
                                     {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
                                   </span>
                                 </div>
+
+                                {/* Task ID copy reference */}
+                                <div className="mt-1.5 flex items-center justify-between gap-1.5 bg-zinc-950/80 border border-zinc-800/80 px-2 py-1 rounded-lg text-[10px]">
+                                  <div className="flex items-center gap-1 min-w-0">
+                                    <span className="text-zinc-500 text-[9px] font-medium shrink-0">Task ID:</span>
+                                    <code className="text-violet-300 font-mono text-[10px] truncate">{task.id}</code>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      navigator.clipboard.writeText(task.id);
+                                      setCopiedTaskId(task.id);
+                                      setTimeout(() => setCopiedTaskId(null), 2000);
+                                    }}
+                                    className="shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                                  >
+                                    {copiedTaskId === task.id ? 'Copied!' : 'Copy'}
+                                  </button>
+                                </div>
+                                <p className="text-[9px] text-zinc-500 mt-1 italic leading-tight">
+                                  Use in commit: <span className="font-mono text-zinc-400">git commit -m &quot;feat: closes #{task.id}&quot;</span>
+                                </p>
 
                                 <p className="text-zinc-400 text-xs mt-2 line-clamp-2 break-words">
                                   {task.description || 'No description provided.'}
@@ -1566,6 +1647,199 @@ export default function ProjectPage() {
                 className="px-5 py-2 bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] hover:shadow-[0_0_15px_rgba(124,58,237,0.2)] cursor-pointer"
               >
                 {assignSubmitting ? 'Assigning...' : 'Confirm Assignment'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* WEBHOOK SETUP MODAL (Leader only) */}
+      {/* ========================================================================= */}
+      {isWebhookModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-xl rounded-2xl border border-zinc-800 bg-[#0c0c0e] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-zinc-800 pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-violet-600/20 border border-violet-500/30 text-violet-400">
+                    <svg className="h-5 w-5" fill="currentColor" viewBox="0 0 24 24">
+                      <path
+                        fillRule="evenodd"
+                        clipRule="evenodd"
+                        d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"
+                      />
+                    </svg>
+                  </div>
+                  <h3 className="text-lg font-bold text-white">GitHub Webhook Integration</h3>
+                </div>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Connect your repository to auto-move Kanban cards and calibrate skills on PR merges.
+                </p>
+              </div>
+              <button
+                onClick={() => setIsWebhookModalOpen(false)}
+                className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Steps Container */}
+            <div className="flex flex-col gap-4 py-4 max-h-[60vh] overflow-y-auto pr-1">
+              {/* Step 1 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  1
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Open GitHub Webhook Settings</p>
+                  <p className="text-zinc-400 mt-0.5">
+                    Go to your repository on GitHub → <strong className="text-zinc-200">Settings</strong> → <strong className="text-zinc-200">Webhooks</strong> → Click <strong className="text-zinc-200">&quot;Add webhook&quot;</strong>.
+                  </p>
+                </div>
+              </div>
+
+              {/* Step 2 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  2
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Payload URL</p>
+                  <div className="mt-1.5 flex items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
+                    <code className="font-mono text-violet-300 text-[11px] break-all">
+                      https://devpulse-collab.vercel.app/api/webhook/github
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText('https://devpulse-collab.vercel.app/api/webhook/github');
+                        setCopiedWebhookUrl(true);
+                        setTimeout(() => setCopiedWebhookUrl(false), 2000);
+                      }}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                    >
+                      {copiedWebhookUrl ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 3 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  3
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Content Type</p>
+                  <div className="mt-1.5 flex items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
+                    <code className="font-mono text-emerald-300 text-[11px]">
+                      application/json
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText('application/json');
+                        setCopiedWebhookContentType(true);
+                        setTimeout(() => setCopiedWebhookContentType(false), 2000);
+                      }}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                    >
+                      {copiedWebhookContentType ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 4 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  4
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Secret</p>
+                  <div className="mt-1.5 flex items-center justify-between gap-2 p-2.5 rounded-xl bg-zinc-950 border border-zinc-800">
+                    <code className="font-mono text-amber-300 text-[11px]">
+                      devpulse_github_secret_2026
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText('devpulse_github_secret_2026');
+                        setCopiedWebhookSecret(true);
+                        setTimeout(() => setCopiedWebhookSecret(false), 2000);
+                      }}
+                      className="shrink-0 px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-[11px] font-semibold transition-colors cursor-pointer"
+                    >
+                      {copiedWebhookSecret ? 'Copied!' : 'Copy'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 5 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  5
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Select Individual Events</p>
+                  <p className="text-zinc-400 mt-0.5">
+                    Select <strong className="text-zinc-200">&quot;Let me select individual events&quot;</strong> and check both:
+                  </p>
+                  <div className="flex gap-2 mt-1.5">
+                    <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[10px]">
+                      ✓ Pushes
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300 font-mono text-[10px]">
+                      ✓ Pull requests
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 6 */}
+              <div className="flex gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-violet-600/30 text-violet-300 text-xs font-bold border border-violet-500/30">
+                  6
+                </div>
+                <div className="flex-1 text-xs text-zinc-300">
+                  <p className="font-semibold text-white">Click &quot;Add webhook&quot;</p>
+                  <p className="text-zinc-400 mt-0.5">
+                    Save the webhook on GitHub, then click the button below to activate the live indicator.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-between border-t border-zinc-800 pt-4 mt-2">
+              <button
+                onClick={() => setIsWebhookModalOpen(false)}
+                className="px-4 py-2 border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+              >
+                Close
+              </button>
+              <button
+                onClick={handleMarkWebhookActive}
+                disabled={webhookUpdating}
+                className="flex items-center gap-2 px-5 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] shadow-[0_0_20px_rgba(16,185,129,0.3)] cursor-pointer"
+              >
+                {webhookUpdating ? (
+                  <>
+                    <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    <span>Activating...</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="h-2 w-2 rounded-full bg-white"></span>
+                    <span>Mark as Active</span>
+                  </>
+                )}
               </button>
             </div>
           </div>

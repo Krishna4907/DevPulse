@@ -18,6 +18,7 @@ export interface Project {
   memberCount?: number;
   maxMembers?: number;
   memberIds?: string[];
+  webhookConfigured?: boolean;
   createdAt: any;
 }
 
@@ -47,6 +48,19 @@ export interface Task {
   projectId: string;
   assigneeId: string | null;
   partnerId: string | null;
+  lastCommit?: {
+    message: string;
+    author: string;
+    timestamp: string;
+    sha: string;
+    url: string;
+  };
+  pr?: {
+    url: string;
+    title: string;
+    number: number;
+  };
+  completedAt?: any;
   createdAt: any;
 }
 
