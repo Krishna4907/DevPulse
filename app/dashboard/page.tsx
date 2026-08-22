@@ -25,6 +25,7 @@ export default function Dashboard() {
   const [techInput, setTechInput] = useState('');
   const [techStack, setTechStack] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
 
   // Listen to current user's doc from "users/{userId}" and fetch projects in real-time
   useEffect(() => {
@@ -194,67 +195,107 @@ export default function Dashboard() {
     setMaxMembers(4);
     setTechInput('');
     setTechStack([]);
+    setCreateError(null);
     setIsModalOpen(true);
   };
 
   const handleCreateProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!projectName.trim() || !deadline || !user) return;
+    setCreateError(null);
+
+    // 1. Verify authenticated user
+    const currentUser = auth.currentUser;
+    if (!currentUser) {
+      console.warn('[DevPulse] auth.currentUser is null during project creation');
+      setCreateError('Please sign in again.');
+      alert('Please sign in again.');
+      router.push('/');
+      return;
+    }
+
+    if (!projectName.trim() || !deadline) {
+      setCreateError('Please provide a project name and deadline.');
+      return;
+    }
+
     setSubmitting(true);
 
     try {
-      // Collect all tags including uncommitted text in techInput
-      const remainingTags = techInput.split(',').map((t) => t.trim()).filter(Boolean);
-      const finalTechStack = Array.from(new Set([...techStack, ...remainingTags]));
-
-      // 1. Create the project document using client SDK
-      const projectRef = await addDoc(collection(db, 'projects'), {
-        name: projectName.trim(),
-        description: description.trim(),
-        deadline,
-        techStack: finalTechStack,
-        maxMembers: Number(maxMembers) || 4,
-        leaderId: user.uid,
-        leaderName: user.displayName || 'GitHub User',
-        memberCount: 1,
-        memberIds: [user.uid],
-        webhookConfigured: false,
-        createdAt: serverTimestamp(),
-      });
-
-      // 2. Add leader as first member in subcollection
-      await setDoc(
-        doc(db, 'projects', projectRef.id, 'members', user.uid),
-        {
-          userId: user.uid,
-          name: user.displayName || 'GitHub User',
-          email: user.email || '',
-          image: user.photoURL || '',
-          role: 'leader',
-          skills: [],
-          skillsSet: false,
-          pendingSkills: [],
-          joinedAt: serverTimestamp(),
-        }
+      // 10-Second Timeout promise
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(
+          () => reject(new Error('Failed to create project. Please try again (operation timed out).')),
+          10000
+        )
       );
 
-      // 3. Add projectId to user's projectIds array
-      const userRef = doc(db, 'users', user.uid);
-      await setDoc(
-        userRef,
-        {
-          projectIds: arrayUnion(projectRef.id),
-        },
-        { merge: true }
-      );
+      const createOperation = async () => {
+        // Collect all tags including uncommitted text in techInput
+        const remainingTags = techInput.split(',').map((t) => t.trim()).filter(Boolean);
+        const finalTechStack = Array.from(new Set([...techStack, ...remainingTags]));
 
-      // Close modal and redirect immediately
+        console.log('[DevPulse] 1. Starting project creation for user:', currentUser.uid, currentUser.displayName);
+
+        // A. Create project document
+        console.log('[DevPulse] 2. Writing project document to Firestore...');
+        const projectRef = await addDoc(collection(db, 'projects'), {
+          name: projectName.trim(),
+          description: description.trim(),
+          deadline,
+          techStack: finalTechStack,
+          maxMembers: Number(maxMembers) || 4,
+          leaderId: currentUser.uid,
+          leaderName: currentUser.displayName || 'GitHub User',
+          memberCount: 1,
+          memberIds: [currentUser.uid],
+          webhookConfigured: false,
+          createdAt: serverTimestamp(),
+        });
+        console.log('[DevPulse] Project doc created with ID:', projectRef.id);
+
+        // B. Add leader as first member in subcollection
+        console.log('[DevPulse] 3. Adding leader to members subcollection...');
+        await setDoc(
+          doc(db, 'projects', projectRef.id, 'members', currentUser.uid),
+          {
+            userId: currentUser.uid,
+            name: currentUser.displayName || 'GitHub User',
+            email: currentUser.email || '',
+            image: currentUser.photoURL || '',
+            role: 'leader',
+            skills: [],
+            skillsSet: false,
+            pendingSkills: [],
+            joinedAt: serverTimestamp(),
+          }
+        );
+        console.log('[DevPulse] Leader member doc added successfully');
+
+        // C. Add projectId to user's projectIds array
+        console.log('[DevPulse] 4. Updating user projectIds...');
+        const userRef = doc(db, 'users', currentUser.uid);
+        await setDoc(
+          userRef,
+          {
+            projectIds: arrayUnion(projectRef.id),
+          },
+          { merge: true }
+        );
+        console.log('[DevPulse] User doc updated with projectId successfully');
+
+        return projectRef.id;
+      };
+
+      // Race between creation and 10s timeout
+      const createdId = (await Promise.race([createOperation(), timeoutPromise])) as string;
+
+      console.log('[DevPulse] Project creation completely finished! Redirecting to:', createdId);
       setIsModalOpen(false);
       setSubmitting(false);
-      router.push(`/projects/${projectRef.id}`);
+      router.push(`/projects/${createdId}`);
     } catch (err: any) {
-      console.error('Error creating project:', err);
-      alert(err.message || 'Error creating project. Please try again.');
+      console.error('[DevPulse] Error creating project:', err);
+      setCreateError(err?.message || 'Failed to create project. Please try again.');
       setSubmitting(false);
     }
   };
@@ -577,14 +618,40 @@ export default function Dashboard() {
                 </div>
               </div>
 
+              {/* Error Message Display */}
+              {createError && (
+                <div className="flex items-start gap-2.5 p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-medium animate-in fade-in duration-200">
+                  <svg
+                    className="h-4 w-4 shrink-0 text-rose-400 mt-0.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"
+                    />
+                  </svg>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="font-semibold text-rose-200">Project Creation Failed</span>
+                    <span>{createError}</span>
+                  </div>
+                </div>
+              )}
+
               {/* Submit Action */}
               <button
                 type="submit"
                 disabled={submitting}
-                className="mt-2 flex w-full items-center justify-center rounded-xl bg-violet-600 py-3 text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] disabled:opacity-50 active:scale-[0.98] cursor-pointer"
+                className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-3 text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] disabled:opacity-50 active:scale-[0.98] cursor-pointer"
               >
                 {submitting ? (
-                  <div className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                  <>
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"></div>
+                    <span>Creating...</span>
+                  </>
                 ) : (
                   'Create Project'
                 )}
