@@ -177,61 +177,71 @@ export default function ProjectPage() {
     if (!user || !project || isProjectFull) return;
     setJoining(true);
     try {
-      // 1. Call Server API join route (guaranteed to succeed with admin SDK)
-      const res = await fetch(`/api/projects/${projectId}/join`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.uid,
-          name: user.displayName || 'GitHub User',
-          email: user.email || '',
-          image: user.photoURL || '',
-        }),
+      const batch = writeBatch(db);
+
+      // 1. Create Member document in projects/{projectId}/members/{userId}
+      const memberRef = doc(db, 'projects', projectId, 'members', user.uid);
+      batch.set(memberRef, {
+        userId: user.uid,
+        name: user.displayName || 'GitHub User',
+        email: user.email || '',
+        image: user.photoURL || '',
+        role: 'member',
+        skills: [],
+        skillsSet: false,
+        pendingSkills: [],
+        joinedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
       });
 
-      // 2. Also execute client-side batch write
-      try {
-        const batch = writeBatch(db);
-        const memberRef = doc(db, 'projects', projectId, 'members', user.uid);
-        batch.set(memberRef, {
+      // 2. Add projectId to user's projectIds array
+      const userRef = doc(db, 'users', user.uid);
+      batch.set(
+        userRef,
+        { projectIds: arrayUnion(projectId) },
+        { merge: true }
+      );
+
+      // 3. Update project metadata
+      const projectRef = doc(db, 'projects', projectId);
+      batch.update(projectRef, {
+        memberCount: increment(1),
+        memberIds: arrayUnion(user.uid),
+      });
+
+      await batch.commit();
+
+      // Update local state reactively
+      setProject((prev) =>
+        prev
+          ? {
+              ...prev,
+              memberCount: (prev.memberCount || 1) + 1,
+              memberIds: Array.from(new Set([...(prev.memberIds || []), user.uid])),
+            }
+          : prev
+      );
+
+      setMembers((prev) => [
+        ...prev.filter((m) => m.userId !== user.uid),
+        {
+          id: user.uid,
           userId: user.uid,
+          projectId,
           name: user.displayName || 'GitHub User',
           email: user.email || '',
           image: user.photoURL || '',
           role: 'member',
           skills: [],
           skillsSet: false,
-          joinedAt: serverTimestamp(),
-          createdAt: serverTimestamp(),
-        });
-
-        const userRef = doc(db, 'users', user.uid);
-        batch.set(
-          userRef,
-          { projectIds: arrayUnion(projectId) },
-          { merge: true }
-        );
-
-        const projectRef = doc(db, 'projects', projectId);
-        batch.update(projectRef, {
-          memberCount: increment(1),
-          memberIds: arrayUnion(user.uid),
-        });
-
-        await batch.commit();
-      } catch (clientErr) {
-        console.warn('Client batch write note (server API handled join):', clientErr);
-      }
-
-      // Re-fetch updated project and member data
-      const refreshRes = await fetch(`/api/projects/${projectId}`);
-      if (refreshRes.ok) {
-        const refreshData = await refreshRes.json();
-        if (refreshData.project) setProject(refreshData.project);
-        if (refreshData.members) setMembers(refreshData.members);
-      }
-    } catch (err) {
+          pendingSkills: [],
+          joinedAt: new Date(),
+          createdAt: new Date(),
+        },
+      ]);
+    } catch (err: any) {
       console.error('Error joining project:', err);
+      alert(err.message || 'Error joining project. Please try again.');
     } finally {
       setJoining(false);
     }
@@ -269,26 +279,12 @@ export default function ProjectPage() {
       const remainingTokens = additionalSkillInput.split(',').map((t) => t.trim()).filter(Boolean);
       const allSkills = Array.from(new Set([...selectedOnboardSkills, ...additionalSkills, ...remainingTokens]));
 
-      // 1. Call Server API skills route
-      await fetch(`/api/projects/${projectId}/skills`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.uid,
-          skills: allSkills,
-        }),
+      // Direct client-side update
+      const memberRef = doc(db, 'projects', projectId, 'members', user.uid);
+      await updateDoc(memberRef, {
+        skills: allSkills,
+        skillsSet: true,
       });
-
-      // 2. Also update client-side member doc
-      try {
-        const memberRef = doc(db, 'projects', projectId, 'members', user.uid);
-        await updateDoc(memberRef, {
-          skills: allSkills,
-          skillsSet: true,
-        });
-      } catch (clientErr) {
-        console.warn('Client updateDoc note (server API handled skills):', clientErr);
-      }
 
       // Update local members state
       setMembers((prev) =>
@@ -298,8 +294,9 @@ export default function ProjectPage() {
       );
 
       setIsOnboardingOpen(false);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error saving onboarding skills:', err);
+      alert(err.message || 'Error saving onboarding skills. Please try again.');
     } finally {
       setOnboardingSubmitting(false);
     }
@@ -449,20 +446,32 @@ export default function ProjectPage() {
         ? selectedTask.skills.filter((s) => !(partnerMember.skills || []).includes(s))
         : [];
 
-      // 1. Update via Server API
-      await fetch(`/api/projects/${projectId}/tasks/${selectedTask.id}/assign`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assigneeId,
-          partnerId: finalPartnerId,
-          type: taskType,
-          missingSkills: driverMissing,
-          partnerMissingSkills: partnerMissing,
-        }),
+      // 1. Direct client update on Task Document
+      const taskRef = doc(db, 'projects', projectId, 'tasks', selectedTask.id);
+      await updateDoc(taskRef, {
+        assigneeId,
+        partnerId: finalPartnerId,
+        type: taskType,
+        assignedAt: serverTimestamp(),
       });
 
-      // 2. Local reactive state update
+      // 2. Update assignee pending skills
+      if (driverMissing.length > 0) {
+        const assigneeRef = doc(db, 'projects', projectId, 'members', assigneeId);
+        await updateDoc(assigneeRef, {
+          pendingSkills: arrayUnion(...driverMissing),
+        });
+      }
+
+      // 3. Update partner pending skills if paired
+      if (finalPartnerId && partnerMissing.length > 0) {
+        const partnerRef = doc(db, 'projects', projectId, 'members', finalPartnerId);
+        await updateDoc(partnerRef, {
+          pendingSkills: arrayUnion(...partnerMissing),
+        });
+      }
+
+      // 4. Local reactive state update
       setTasks((prev) =>
         prev.map((t) =>
           t.id === selectedTask.id
@@ -501,8 +510,9 @@ export default function ProjectPage() {
 
       setIsAssignOpen(false);
       setSelectedTask(null);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error assigning task:', err);
+      alert(err.message || 'Error assigning task. Please try again.');
     } finally {
       setAssignSubmitting(false);
     }

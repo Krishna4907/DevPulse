@@ -5,7 +5,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
 import { auth, db } from '@/lib/firebase';
-import { collection, onSnapshot, doc, setDoc, updateDoc, writeBatch, arrayUnion, serverTimestamp } from 'firebase/firestore';
+import { collection, onSnapshot, doc, setDoc, updateDoc, writeBatch, arrayUnion, serverTimestamp, addDoc } from 'firebase/firestore';
 import { Project } from '@/lib/types';
 import Link from 'next/link';
 
@@ -207,35 +207,51 @@ export default function Dashboard() {
       const remainingTags = techInput.split(',').map((t) => t.trim()).filter(Boolean);
       const finalTechStack = Array.from(new Set([...techStack, ...remainingTags]));
 
-      // 1. Create project via Server API (guaranteed fast and reliable with Admin SDK)
-      const res = await fetch('/api/projects/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: projectName.trim(),
-          description: description.trim(),
-          deadline,
-          techStack: finalTechStack,
-          maxMembers: Number(maxMembers) || 4,
-          leaderId: user.uid,
-          leaderName: user.displayName || 'GitHub User',
-          email: user.email || '',
-          image: user.photoURL || '',
-        }),
+      // 1. Create the project document using client SDK
+      const projectRef = await addDoc(collection(db, 'projects'), {
+        name: projectName.trim(),
+        description: description.trim(),
+        deadline,
+        techStack: finalTechStack,
+        maxMembers: Number(maxMembers) || 4,
+        leaderId: user.uid,
+        leaderName: user.displayName || 'GitHub User',
+        memberCount: 1,
+        memberIds: [user.uid],
+        webhookConfigured: false,
+        createdAt: serverTimestamp(),
       });
 
-      const data = await res.json();
+      // 2. Add leader as first member in subcollection
+      await setDoc(
+        doc(db, 'projects', projectRef.id, 'members', user.uid),
+        {
+          userId: user.uid,
+          name: user.displayName || 'GitHub User',
+          email: user.email || '',
+          image: user.photoURL || '',
+          role: 'leader',
+          skills: [],
+          skillsSet: false,
+          pendingSkills: [],
+          joinedAt: serverTimestamp(),
+        }
+      );
 
-      if (!res.ok || !data.projectId) {
-        throw new Error(data.error || 'Failed to create project');
-      }
-
-      const createdProjectId = data.projectId;
+      // 3. Add projectId to user's projectIds array
+      const userRef = doc(db, 'users', user.uid);
+      await setDoc(
+        userRef,
+        {
+          projectIds: arrayUnion(projectRef.id),
+        },
+        { merge: true }
+      );
 
       // Close modal and redirect immediately
       setIsModalOpen(false);
       setSubmitting(false);
-      router.push(`/projects/${createdProjectId}`);
+      router.push(`/projects/${projectRef.id}`);
     } catch (err: any) {
       console.error('Error creating project:', err);
       alert(err.message || 'Error creating project. Please try again.');
