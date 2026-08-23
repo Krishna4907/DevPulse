@@ -1,29 +1,50 @@
-import { getAdminDb } from '@/lib/firebase-admin';
+import { initializeApp, getApps, cert, getApp } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
+import { formatPrivateKey } from '@/lib/firebase-admin';
 
 export async function GET() {
-  let adminError = null;
-  let adminInitialized = false;
+  let initError: any = null;
+  let testQuerySuccess = false;
+  let testQueryCount = 0;
+  let formattedKeyPreview = '';
+
+  const projectId = (process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || '').trim();
+  const clientEmail = (process.env.FIREBASE_ADMIN_CLIENT_EMAIL || '').trim();
+  const rawKey = (process.env.FIREBASE_ADMIN_PRIVATE_KEY || '').trim();
 
   try {
-    const db = getAdminDb();
-    adminInitialized = !!db;
+    const formattedKey = formatPrivateKey(rawKey);
+    formattedKeyPreview = formattedKey.substring(0, 40) + '...' + formattedKey.substring(formattedKey.length - 30);
+
+    if (!getApps().length) {
+      initializeApp({
+        credential: cert({
+          projectId,
+          clientEmail,
+          privateKey: formattedKey,
+        }),
+      });
+    }
+
+    const db = getFirestore(getApp());
+    const snap = await db.collection('projects').get();
+    testQuerySuccess = true;
+    testQueryCount = snap.docs.length;
   } catch (e: any) {
-    adminError = e?.message || String(e);
+    initError = {
+      message: e?.message || String(e),
+      stack: e?.stack || '',
+      code: e?.code || '',
+    };
   }
 
-  const rawKey = process.env.FIREBASE_ADMIN_PRIVATE_KEY || '';
-
   return Response.json({
-    adminInitialized,
-    adminError,
-    hasProjectId: !!(process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID),
-    hasClientEmail: !!process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
-    clientEmail: process.env.FIREBASE_ADMIN_CLIENT_EMAIL,
-    hasPrivateKey: !!rawKey,
-    privateKeyLength: rawKey.length,
-    privateKeyStartsWithBegin: rawKey.includes('-----BEGIN PRIVATE KEY-----'),
-    privateKeyEndsWithEnd: rawKey.includes('-----END PRIVATE KEY-----'),
-    hasEscapedNewlines: rawKey.includes('\\n'),
-    hasRealNewlines: rawKey.includes('\n'),
+    testQuerySuccess,
+    testQueryCount,
+    initError,
+    formattedKeyPreview,
+    projectId,
+    clientEmail,
+    rawKeyLength: rawKey.length,
   });
 }
