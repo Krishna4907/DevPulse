@@ -97,6 +97,31 @@ export default function ProjectPage() {
   const [recentAiDiagnosis, setRecentAiDiagnosis] = useState<{ causes: string[]; fix: string; resource?: string } | null>(null);
   const [resolvingBlockerId, setResolvingBlockerId] = useState<string | null>(null);
 
+  // Phase 7: Mobile Kanban swipe tab & Toast Notification system
+  const [mobileActiveColumn, setMobileActiveColumn] = useState<Task['status']>('todo');
+
+  interface ToastMessage {
+    id: string;
+    text: string;
+    type: 'success' | 'info' | 'warning' | 'error';
+  }
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const showToast = (text: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts((prev) => [...prev, { id, text, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3000);
+  };
+
+  // Dynamic Page Title
+  useEffect(() => {
+    if (project?.name) {
+      document.title = `${project.name} | DevPulse`;
+    }
+  }, [project?.name]);
+
   // Redirect if not logged in
   useEffect(() => {
     if (!authLoading && !user) {
@@ -528,9 +553,10 @@ export default function ProjectPage() {
       }
 
       setBlockerSuccessMessage('Blocker submitted and AI diagnosis generated!');
+      showToast('Blocker raised — AI diagnosing...', 'warning');
     } catch (err: any) {
       console.error('Error raising blocker:', err);
-      alert('Failed to raise blocker. Please try again.');
+      showToast(err?.message || 'Failed to raise blocker', 'error');
       setBlockerSuccessMessage(null);
     } finally {
       setBlockerSubmitting(false);
@@ -557,11 +583,35 @@ export default function ProjectPage() {
         blockerCount: increment(-1),
         hasBlocker: remainingForTask.length > 0,
       });
+
+      showToast('Blocker marked as resolved!', 'success');
     } catch (err: any) {
       console.error('Error resolving blocker:', err);
-      alert('Failed to resolve blocker. Please try again.');
+      showToast('Failed to resolve blocker', 'error');
     } finally {
       setResolvingBlockerId(null);
+    }
+  };
+
+  // Update Task Status (Kanban mover)
+  const handleUpdateTaskStatus = async (taskId: string, newStatus: Task['status']) => {
+    try {
+      const taskRef = doc(db, 'projects', projectId, 'tasks', taskId);
+      await updateDoc(taskRef, {
+        status: newStatus,
+        updatedAt: serverTimestamp(),
+      });
+
+      setTasks((prev) => prev.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t)));
+
+      if (newStatus === 'done') {
+        showToast('Task moved to Done — skills updated!', 'success');
+      } else {
+        showToast(`Task moved to ${newStatus}`, 'info');
+      }
+    } catch (err: any) {
+      console.error('Error updating task status:', err);
+      showToast('Failed to update task status', 'error');
     }
   };
 
@@ -772,20 +822,12 @@ export default function ProjectPage() {
       });
 
       setIsAddTaskOpen(false);
-    } catch (err) {
+      showToast('Task created successfully', 'success');
+    } catch (err: any) {
       console.error('Error creating task:', err);
+      showToast(err?.message || 'Error creating task', 'error');
     } finally {
       setTaskSubmitting(false);
-    }
-  };
-
-  // Task Status Update
-  const handleUpdateTaskStatus = async (taskId: string, newStatus: Task['status']) => {
-    try {
-      const taskRef = doc(db, 'projects', projectId, 'tasks', taskId);
-      await updateDoc(taskRef, { status: newStatus });
-    } catch (err) {
-      console.error('Error updating task status:', err);
     }
   };
 
@@ -932,11 +974,13 @@ export default function ProjectPage() {
         );
       }
 
+      const assigneeMember = members.find((m) => m.userId === assigneeId);
       setIsAssignOpen(false);
       setSelectedTask(null);
+      showToast(`Task assigned to ${assigneeMember?.name || 'team member'}`, 'info');
     } catch (err: any) {
       console.error('Error assigning task:', err);
-      alert(err.message || 'Error assigning task. Please try again.');
+      showToast(err?.message || 'Error assigning task', 'error');
     } finally {
       setAssignSubmitting(false);
     }
@@ -1779,42 +1823,85 @@ export default function ProjectPage() {
                     </div>
                   )}
 
-                  {/* 4 Kanban Columns */}
-                  <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
-                    {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
-                      const statusTasks = filteredTasks.filter((t) => t.status === status);
-                      const columnName =
-                        status === 'todo'
-                          ? 'To Do'
-                          : status === 'inprogress'
-                          ? 'In Progress'
-                          : status === 'inreview'
-                          ? 'In Review'
-                          : 'Done';
-
-                      const columnColor =
-                        status === 'todo'
-                          ? 'border-zinc-800/80 bg-zinc-900/20'
-                          : status === 'inprogress'
-                          ? 'border-blue-900/30 bg-blue-950/10'
-                          : status === 'inreview'
-                          ? 'border-amber-900/30 bg-amber-950/10'
-                          : 'border-emerald-900/30 bg-emerald-950/10';
-
-                      const badgeColor =
-                        status === 'todo'
-                          ? 'bg-zinc-800 text-zinc-300'
-                          : status === 'inprogress'
-                          ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                          : status === 'inreview'
-                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                          : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
-
-                      return (
-                        <div
-                          key={status}
-                          className={`flex flex-col border rounded-2xl p-4 min-h-[420px] transition-all backdrop-blur-sm ${columnColor}`}
+                  {/* Empty Board State (when 0 tasks exist in project) */}
+                  {tasks.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center border border-dashed border-zinc-800 rounded-2xl p-12 text-center bg-zinc-900/10 w-full">
+                      <div className="h-14 w-14 rounded-2xl bg-violet-600/10 border border-violet-500/20 flex items-center justify-center mb-4 text-violet-400 shadow-[0_0_20px_rgba(124,58,237,0.15)]">
+                        <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M9 4.5v15m6-15v15m-10.875 0h17.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125Z" />
+                        </svg>
+                      </div>
+                      <h3 className="text-xl font-bold text-white">Board is empty</h3>
+                      <p className="text-zinc-400 text-xs sm:text-sm max-w-sm mt-1.5 leading-relaxed">
+                        Add your first task to get started.
+                      </p>
+                      {isLeader && (
+                        <button
+                          onClick={openAddTaskModal}
+                          className="mt-6 px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition-all shadow-[0_0_20px_rgba(124,58,237,0.3)] active:scale-95 cursor-pointer"
                         >
+                          + Add Task
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      {/* Mobile Column Navigation Tabs (sm:hidden) */}
+                      <div className="sm:hidden flex items-center justify-between bg-zinc-950/80 border border-zinc-800 p-1 rounded-xl w-full">
+                        {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((st) => (
+                          <button
+                            key={st}
+                            type="button"
+                            onClick={() => setMobileActiveColumn(st)}
+                            className={`flex-1 py-1.5 px-1 text-center text-[10px] font-bold rounded-lg transition-all ${
+                              mobileActiveColumn === st
+                                ? 'bg-violet-600 text-white shadow'
+                                : 'text-zinc-400 hover:text-white'
+                            }`}
+                          >
+                            {st === 'todo' ? 'To Do' : st === 'inprogress' ? 'In Prog' : st === 'inreview' ? 'Review' : 'Done'} ({tasksByStatus(st).length})
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* 4 Kanban Columns */}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
+                        {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
+                          const statusTasks = filteredTasks.filter((t) => t.status === status);
+                          const columnName =
+                            status === 'todo'
+                              ? 'To Do'
+                              : status === 'inprogress'
+                              ? 'In Progress'
+                              : status === 'inreview'
+                              ? 'In Review'
+                              : 'Done';
+
+                          const columnColor =
+                            status === 'todo'
+                              ? 'border-zinc-800/80 bg-zinc-900/20'
+                              : status === 'inprogress'
+                              ? 'border-blue-900/30 bg-blue-950/10'
+                              : status === 'inreview'
+                              ? 'border-amber-900/30 bg-amber-950/10'
+                              : 'border-emerald-900/30 bg-emerald-950/10';
+
+                          const badgeColor =
+                            status === 'todo'
+                              ? 'bg-zinc-800 text-zinc-300'
+                              : status === 'inprogress'
+                              ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                              : status === 'inreview'
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+
+                          return (
+                            <div
+                              key={status}
+                              className={`flex flex-col border rounded-2xl p-4 min-h-[420px] transition-all backdrop-blur-sm ${columnColor} ${
+                                mobileActiveColumn === status ? 'flex' : 'hidden sm:flex'
+                              }`}
+                            >
                           {/* Column Header */}
                           <div className="flex items-center justify-between mb-4 border-b border-zinc-800/60 pb-3">
                             <div className="flex items-center gap-2">
@@ -2077,6 +2164,8 @@ export default function ProjectPage() {
                       );
                     })}
                   </div>
+                </>
+              )}
 
                   {/* 6. MEMBER SIDE: "MY PROGRESS" SECTION */}
                   {currentMember && (
@@ -3261,6 +3350,32 @@ export default function ProjectPage() {
           </div>
         </div>
       )}
+
+      {/* Toast Notification Container */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2.5 transition-all animate-in slide-in-from-bottom-5 duration-200 border ${
+              toast.type === 'success'
+                ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/40'
+                : toast.type === 'error'
+                ? 'bg-rose-950/90 text-rose-200 border-rose-500/40'
+                : toast.type === 'warning'
+                ? 'bg-amber-950/90 text-amber-200 border-amber-500/40'
+                : 'bg-violet-950/90 text-violet-200 border-violet-500/40'
+            }`}
+          >
+            <span>
+              {toast.type === 'success' && '✓'}
+              {toast.type === 'error' && '✕'}
+              {toast.type === 'warning' && '⚠️'}
+              {toast.type === 'info' && '✨'}
+            </span>
+            <span>{toast.text}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

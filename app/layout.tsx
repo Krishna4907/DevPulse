@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "DevPulse",
-  description: "Smart collaboration for student teams",
+  title: "DevPulse — Smart Collaboration for Student Teams",
+  description: "Smart collaboration platform for student teams. AI-powered task assignment, real-time Git integration, and skill tracking.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

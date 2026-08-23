@@ -16,8 +16,31 @@ export default function Dashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
 
+  // Page Title & Toast Notification State
+  useEffect(() => {
+    document.title = 'Dashboard | DevPulse';
+  }, []);
+
+  interface ToastMessage {
+    id: string;
+    text: string;
+    type: 'success' | 'info' | 'warning' | 'error';
+  }
+  const [toasts, setToasts] = useState<ToastMessage[]>([]);
+
+  const showToast = (text: string, type: 'success' | 'info' | 'warning' | 'error' = 'info') => {
+    const id = Math.random().toString(36).substring(2, 9);
+    setToasts((prev) => [...prev, { id, text, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3000);
+  };
+
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
+  const [joinLinkInput, setJoinLinkInput] = useState('');
+  const [seedingDemo, setSeedingDemo] = useState(false);
   const [projectName, setProjectName] = useState('');
   const [description, setDescription] = useState('');
   const [deadline, setDeadline] = useState('');
@@ -292,11 +315,54 @@ export default function Dashboard() {
       console.log('[DevPulse] Project creation completely finished! Redirecting to:', createdId);
       setIsModalOpen(false);
       setSubmitting(false);
+      showToast('Project created successfully', 'success');
       router.push(`/projects/${createdId}`);
     } catch (err: any) {
       console.error('[DevPulse] Error creating project:', err);
       setCreateError(err?.message || 'Failed to create project. Please try again.');
+      showToast(err?.message || 'Failed to create project', 'error');
       setSubmitting(false);
+    }
+  };
+
+  const handleJoinWithLink = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!joinLinkInput.trim()) return;
+
+    let targetId = joinLinkInput.trim();
+    const match = targetId.match(/projects\/([a-zA-Z0-9_-]+)/);
+    if (match) {
+      targetId = match[1];
+    }
+
+    showToast('Redirecting to project workspace...', 'info');
+    router.push(`/projects/${targetId}`);
+  };
+
+  const handleSeedDemoData = async () => {
+    setSeedingDemo(true);
+    try {
+      const res = await fetch('/api/seed-demo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: user?.uid,
+          userName: user?.displayName || 'Demo Leader',
+          userEmail: user?.email || '',
+          userImage: user?.photoURL || '',
+        }),
+      });
+      const data = await res.json();
+      if (data.success && data.projectId) {
+        showToast('Demo project "EduCollab App" seeded successfully!', 'success');
+        router.push(`/projects/${data.projectId}`);
+      } else {
+        showToast(data.error || 'Failed to seed demo data', 'error');
+      }
+    } catch (err: any) {
+      showToast(err?.message || 'Error seeding demo data', 'error');
+    } finally {
+      setSeedingDemo(false);
     }
   };
 
@@ -313,33 +379,61 @@ export default function Dashboard() {
 
   return (
     <div className="relative min-h-screen bg-[#09090b] text-[#fafafa] font-sans flex flex-col">
+      {/* Toast Notification Container */}
+      <div className="fixed bottom-6 right-6 z-50 flex flex-col gap-2 pointer-events-none">
+        {toasts.map((toast) => (
+          <div
+            key={toast.id}
+            className={`pointer-events-auto px-4 py-3 rounded-xl shadow-2xl text-xs font-semibold flex items-center gap-2.5 transition-all animate-in slide-in-from-bottom-5 duration-200 border ${
+              toast.type === 'success'
+                ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/40'
+                : toast.type === 'error'
+                ? 'bg-rose-950/90 text-rose-200 border-rose-500/40'
+                : toast.type === 'warning'
+                ? 'bg-amber-950/90 text-amber-200 border-amber-500/40'
+                : 'bg-violet-950/90 text-violet-200 border-violet-500/40'
+            }`}
+          >
+            <span>
+              {toast.type === 'success' && '✓'}
+              {toast.type === 'error' && '✕'}
+              {toast.type === 'warning' && '⚠️'}
+              {toast.type === 'info' && '✨'}
+            </span>
+            <span>{toast.text}</span>
+          </div>
+        ))}
+      </div>
+
       {/* Background Decorative Glow */}
       <div className="absolute top-0 right-0 h-[400px] w-[400px] rounded-full bg-violet-600/5 blur-[100px] pointer-events-none"></div>
 
       {/* Header */}
       <header className="z-10 border-b border-zinc-800 bg-zinc-900/20 backdrop-blur-md px-6 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-tr from-violet-600 to-indigo-600 shadow-[0_0_10px_rgba(124,58,237,0.2)]">
-            <svg
-              className="h-5 w-5 text-white"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
-            >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
-            </svg>
-          </div>
-          <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white to-zinc-400 bg-clip-text text-transparent">
-            DevPulse
-          </span>
+          <Link href="/" className="flex items-center gap-3 hover:opacity-90 transition-opacity">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-tr from-violet-600 to-indigo-600 shadow-[0_0_10px_rgba(124,58,237,0.2)]">
+              <svg
+                className="h-5 w-5 text-white"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2.5}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M13 10V3L4 14h7v7l9-11h-7z"
+                />
+              </svg>
+            </div>
+            <span className="font-bold text-lg tracking-tight bg-gradient-to-r from-white to-zinc-400 bg-clip-text text-transparent">
+              DevPulse
+            </span>
+          </Link>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           {user.photoURL && (
             <img
               src={user.photoURL}
@@ -348,16 +442,16 @@ export default function Dashboard() {
             />
           )}
           <button
-            onClick={handleSignOut}
-            className="text-xs font-semibold text-zinc-400 hover:text-white border border-zinc-800 hover:border-zinc-700 px-3 py-1.5 rounded-lg transition-colors"
+            onClick={() => signOut(auth)}
+            className="text-xs text-zinc-400 hover:text-white px-3 py-1.5 rounded-lg border border-zinc-800 hover:border-zinc-700 transition-colors"
           >
             Sign Out
           </button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-12 z-10 flex flex-col justify-start">
+      {/* Main Content Area */}
+      <main className="flex-1 max-w-6xl w-full mx-auto px-6 py-10 z-10 flex flex-col justify-start">
         {/* Welcome Section */}
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6 border-b border-zinc-800/80 pb-8">
           <div>
@@ -369,31 +463,55 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <button
-            onClick={openModal}
-            className="self-start md:self-auto flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] active:scale-[0.98]"
-          >
-            <svg
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-              strokeWidth={2.5}
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              onClick={() => setIsJoinModalOpen(true)}
+              className="flex items-center justify-center gap-2 rounded-xl bg-zinc-900 border border-zinc-800 px-4 py-2.5 text-xs sm:text-sm font-semibold text-zinc-300 hover:text-white hover:bg-zinc-800 transition-all cursor-pointer"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 4.5v15m7.5-7.5h-15"
-              />
-            </svg>
-            <span>Create Project</span>
-          </button>
+              <span>🔗 Join with Link</span>
+            </button>
+
+            <button
+              onClick={openModal}
+              className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-[0_0_20px_rgba(124,58,237,0.3)] active:scale-[0.98] cursor-pointer"
+            >
+              <svg
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2.5}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              <span>Create Project</span>
+            </button>
+          </div>
         </div>
 
         {/* Dashboard Projects State */}
         {loadingProjects ? (
-          <div className="mt-16 flex justify-center items-center">
-            <div className="h-8 w-8 animate-spin rounded-full border-4 border-violet-500 border-t-transparent"></div>
+          /* SKELETON LOADERS */
+          <div className="mt-10 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {[1, 2, 3].map((i) => (
+              <div
+                key={i}
+                className="p-6 rounded-2xl border border-zinc-800/80 bg-zinc-900/30 animate-pulse h-[240px] flex flex-col justify-between"
+              >
+                <div className="flex flex-col gap-3">
+                  <div className="h-5 w-2/3 bg-zinc-800 rounded-lg"></div>
+                  <div className="h-3 w-full bg-zinc-800/60 rounded"></div>
+                  <div className="h-3 w-4/5 bg-zinc-800/60 rounded"></div>
+                </div>
+                <div className="flex flex-col gap-3">
+                  <div className="flex gap-2">
+                    <div className="h-4 w-12 bg-zinc-800 rounded"></div>
+                    <div className="h-4 w-12 bg-zinc-800 rounded"></div>
+                  </div>
+                  <div className="h-4 w-full bg-zinc-800/40 rounded"></div>
+                </div>
+              </div>
+            ))}
           </div>
         ) : projects.length > 0 ? (
           <div className="mt-10">
@@ -468,30 +586,102 @@ export default function Dashboard() {
             </div>
           </div>
         ) : (
-          /* Dashboard Empty State Placeholder */
+          /* EMPTY STATE */
           <div className="mt-12 flex-1 flex flex-col items-center justify-center border border-dashed border-zinc-800 rounded-2xl p-12 text-center bg-zinc-900/10">
-            <div className="h-12 w-12 rounded-xl bg-zinc-800/50 flex items-center justify-center mb-4 text-zinc-500">
-              <svg
-                className="h-6 w-6"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={1.5}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M2.25 12.75V12A9 9 0 0 1 12 3v0a9 9 0 0 1 9 9v.75m-.75-3.75h.008v.008H21V9m-9 12a9 9 0 1 1 0-18 9 9 0 0 1 0 18Z"
-                />
+            <div className="h-14 w-14 rounded-2xl bg-violet-600/10 border border-violet-500/20 flex items-center justify-center mb-4 text-violet-400 shadow-[0_0_20px_rgba(124,58,237,0.15)]">
+              <svg className="h-7 w-7" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v6m3-3H9m12 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
               </svg>
             </div>
-            <h3 className="text-lg font-bold text-zinc-300">No active projects</h3>
-            <p className="text-zinc-500 text-sm max-w-sm mt-1">
-              Get started by creating a new project or request to join an existing team.
+            <h3 className="text-xl font-bold text-white">No projects yet</h3>
+            <p className="text-zinc-400 text-xs sm:text-sm max-w-md mt-1.5 leading-relaxed">
+              Create your first project or join a team with an invite link.
             </p>
+
+            <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+              <button
+                onClick={openModal}
+                className="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white text-xs font-bold transition-all shadow-[0_0_20px_rgba(124,58,237,0.3)] active:scale-95 cursor-pointer"
+              >
+                Create Project
+              </button>
+              <button
+                onClick={() => setIsJoinModalOpen(true)}
+                className="px-5 py-2.5 rounded-xl border border-zinc-800 bg-zinc-900 hover:bg-zinc-800 hover:text-white text-zinc-300 text-xs font-bold transition-all active:scale-95 cursor-pointer"
+              >
+                Join with Link
+              </button>
+              <button
+                onClick={handleSeedDemoData}
+                disabled={seedingDemo}
+                className="px-4 py-2.5 rounded-xl border border-dashed border-emerald-500/40 bg-emerald-950/20 hover:bg-emerald-950/40 text-emerald-300 text-xs font-bold transition-all active:scale-95 cursor-pointer flex items-center gap-1.5"
+              >
+                {seedingDemo ? (
+                  <>
+                    <div className="h-3 w-3 animate-spin rounded-full border-2 border-emerald-400 border-t-transparent" />
+                    <span>Seeding Demo...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>⚡ Seed Demo Data</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         )}
       </main>
+
+      {/* JOIN WITH LINK MODAL */}
+      {isJoinModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="relative w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
+              <h3 className="text-lg font-bold text-white">Join Project Team</h3>
+              <button
+                onClick={() => setIsJoinModalOpen(false)}
+                className="text-zinc-400 hover:text-white transition-colors cursor-pointer"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <form onSubmit={handleJoinWithLink} className="flex flex-col gap-4 pt-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-300">
+                  Project Link or ID
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Paste invite link or projectId..."
+                  value={joinLinkInput}
+                  onChange={(e) => setJoinLinkInput(e.target.value)}
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-violet-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+                <button
+                  type="button"
+                  onClick={() => setIsJoinModalOpen(false)}
+                  className="px-4 py-2 border border-zinc-800 text-zinc-400 hover:text-white rounded-xl text-xs font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-violet-600 hover:bg-violet-500 text-white rounded-xl text-xs font-semibold shadow-[0_0_15px_rgba(124,58,237,0.3)] cursor-pointer"
+                >
+                  Join Project
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* CREATE PROJECT MODAL */}
       {isModalOpen && (
