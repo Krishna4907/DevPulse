@@ -1,36 +1,89 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DevPulse — Smart Collaboration for Student Teams
 
-## Getting Started
+> **Smart collaboration platform for student teams that balances skill learning with delivery speed through explore/exploit task assignment, automated Git integrations, and instant AI blocker diagnostics.**
 
-First, run the development server:
+---
 
+## ⚡ Problem
+Students in hackathons and coursework projects face unbalanced skill levels — one experienced person carries everything while beginners learn nothing, get stuck on bugs, or drop off. Traditional project management tools are static, manual, and unaware of developer skill growth.
+
+---
+
+## 💡 Solution
+**DevPulse** is an AI-powered project collaboration platform that:
+- **Assigns tasks based on skill level** using an explore/exploit algorithm (Safe vs Stretch vs Overload + Navigator pairing).
+- **Auto-moves Kanban cards** when commits and PRs are pushed via automated GitHub webhooks.
+- **Diagnoses blockers using AI** in under 2 seconds (Google Gemini 1.5 Flash).
+- **Tracks skill growth automatically** on every pull request merge.
+
+---
+
+## ✨ Features
+
+- 🔐 **GitHub OAuth Authentication**: Seamless developer sign-in and profile synchronization.
+- ⚡ **Smart Task Assignment**: Intelligent scoring engine categorizing tasks into:
+  - **Safe**: Member already has 100% of required skills.
+  - **Stretch**: Member has ~50%+ skills, assigned to promote learning.
+  - **Overload**: Member has <50% skills, automatically pairs with an experienced navigator.
+- 🔗 **Real-Time Git-Powered Kanban Board**:
+  - Auto-moves tasks to *In Progress* on commit with `#taskId`.
+  - Auto-moves tasks to *In Review* on Pull Request creation.
+  - Auto-moves tasks to *Done* and awards skill badges upon PR merge.
+- 🤖 **AI Blocker Diagnosis**:
+  - Instant root cause analysis, actionable code fix, and reference documentation links in under 2 seconds powered by Google Gemini.
+- 💬 **Real-Time Team Chat**:
+  - Firestore live message synchronization, typing presence indicators, and unread badges.
+- 🟢 **Member Presence Tracking**:
+  - Live active/idle/blocked status indicators for team awareness.
+- 📊 **Leader Dashboard & Skill Coverage Matrix**:
+  - Live team overview metrics, unresolved blockers panel with 1-click resolve, and tech stack capability gap analysis.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Framework**: Next.js 16 (App Router) + TypeScript
+- **Styling**: Tailwind CSS + Vanilla CSS Micro-animations
+- **Database & Auth**: Firebase Auth + Cloud Firestore (Real-time listeners) + Firebase Admin SDK
+- **AI Engine**: Google Gemini 1.5 Flash API
+- **Webhooks**: GitHub REST & Webhook APIs
+- **Deployment**: Vercel
+
+---
+
+## 🌐 Live Demo & Repository
+
+- **Live URL**: [https://devpulse-collab.vercel.app](https://devpulse-collab.vercel.app)
+- **GitHub Repository**: [https://github.com/Krishna4907/DevPulse](https://github.com/Krishna4907/DevPulse)
+
+---
+
+## 🚀 Setup & Local Development
+
+### 1. Clone the repository
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone https://github.com/Krishna4907/DevPulse.git
+cd DevPulse
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Configure Environment Variables
+Copy `.env.example` to `.env.local` and add your Firebase and Gemini credentials:
+```bash
+cp .env.example .env.local
+```
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### 3. Install Dependencies
+```bash
+npm install
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+### 4. Run Locally
+```bash
+npm run dev
+```
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## 🏆 Built for
+**Razorpay Buildathon 2026 — Open Track**
