@@ -29,14 +29,14 @@ function verifySignature(payload: string, signature: string): boolean {
 }
 
 // Parse task ID from commit message / PR text
-// Supports: closes #TASKID, fixes #TASKID, refs #TASKID, #TASKID, or standalone 20-char Firestore ID
 function extractTaskId(text: string): string | null {
   if (!text) return null;
   const patterns = [
-    /closes\s+#?([a-zA-Z0-9_-]{15,35})/i,
-    /fixes\s+#?([a-zA-Z0-9_-]{15,35})/i,
-    /refs\s+#?([a-zA-Z0-9_-]{15,35})/i,
-    /#([a-zA-Z0-9_-]{15,35})/,
+    /closes\s+#([a-zA-Z0-9]{10,25})/i,
+    /fixes\s+#([a-zA-Z0-9]{10,25})/i,
+    /refs\s+#([a-zA-Z0-9]{10,25})/i,
+    /close\s+#([a-zA-Z0-9]{10,25})/i,
+    /#([a-zA-Z0-9]{15,25})/,
     /\b([a-zA-Z0-9]{20})\b/,
   ];
   for (const pattern of patterns) {
@@ -162,9 +162,19 @@ export async function POST(request: NextRequest) {
     // EVENT 2: Pull Request opened — move to In Review
     if (event === 'pull_request' && body.action === 'opened') {
       const pr = body.pull_request;
-      const searchText = `${pr?.title || ''} ${pr?.body || ''}`;
+      const prTitle = pr?.title || '';
+      const prBody = pr?.body || '';
+      const prHead = pr?.head?.ref || '';
+      const searchText = `${prTitle} ${prBody} ${prHead}`;
+
+      console.log('PR opened event received');
+      console.log('PR title:', prTitle);
+      console.log('PR body:', prBody);
+      console.log('PR head ref:', prHead);
+      console.log('Search text:', searchText);
       const taskId = extractTaskId(searchText);
-      console.log(`[Webhook] PR opened: "${pr?.title}" -> Extracted Task ID:`, taskId);
+      console.log('Extracted task ID:', taskId);
+
       if (!taskId) return Response.json({ message: 'No task ID found in PR' });
 
       const result = await findTask(taskId);
@@ -200,9 +210,19 @@ export async function POST(request: NextRequest) {
       body.pull_request?.merged === true
     ) {
       const pr = body.pull_request;
-      const searchText = `${pr?.title || ''} ${pr?.body || ''}`;
+      const prTitle = pr?.title || '';
+      const prBody = pr?.body || '';
+      const prHead = pr?.head?.ref || '';
+      const searchText = `${prTitle} ${prBody} ${prHead}`;
+
+      console.log('PR merged event received');
+      console.log('PR title:', prTitle);
+      console.log('PR body:', prBody);
+      console.log('PR head ref:', prHead);
+      console.log('Search text:', searchText);
       const taskId = extractTaskId(searchText);
-      console.log(`[Webhook] PR merged: "${pr?.title}" -> Extracted Task ID:`, taskId);
+      console.log('Extracted task ID:', taskId);
+
       if (!taskId) return Response.json({ message: 'No task ID found in PR' });
 
       const result = await findTask(taskId);
