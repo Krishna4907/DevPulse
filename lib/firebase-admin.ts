@@ -1,51 +1,52 @@
 import { initializeApp, getApps, cert, getApp } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 
-export function formatPrivateKey(key: string): string {
-  if (!key) return '';
-  let clean = key.trim().replace(/^["']|["']$/g, '');
+export function getPrivateKey(): string {
+  const key = process.env.FIREBASE_ADMIN_PRIVATE_KEY;
+  if (!key) throw new Error('FIREBASE_ADMIN_PRIVATE_KEY missing');
 
-  // 1. Check if it's base64-encoded (100% resilient across Vercel environments)
-  try {
-    const decoded = Buffer.from(clean, 'base64').toString('utf8');
-    if (decoded.includes('-----BEGIN PRIVATE KEY-----')) {
-      clean = decoded;
-    }
-  } catch {}
+  const trimmed = key.trim().replace(/^["']|["']$/g, '');
 
-  // 2. Replace escaped and Windows newlines
-  clean = clean.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
-
-  // 3. Ensure trailing newline
-  if (!clean.endsWith('\n')) {
-    clean += '\n';
+  // Check if it's Base64 encoded (no dashes at start)
+  if (!trimmed.startsWith('-----')) {
+    const decoded = Buffer.from(trimmed, 'base64').toString('utf-8');
+    return decoded;
   }
 
-  return clean;
+  // Handle escaped newlines
+  if (trimmed.includes('\\n')) {
+    return trimmed.replace(/\\n/g, '\n');
+  }
+
+  return trimmed;
+}
+
+export function formatPrivateKey(key: string): string {
+  return getPrivateKey();
 }
 
 export function getAdminDb(): Firestore | null {
   const projectId = (process.env.FIREBASE_ADMIN_PROJECT_ID || process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || '').trim();
   const clientEmail = (process.env.FIREBASE_ADMIN_CLIENT_EMAIL || '').trim();
-  const privateKeyRaw = (process.env.FIREBASE_ADMIN_PRIVATE_KEY || '').trim();
-
-  if (!projectId || !clientEmail || !privateKeyRaw) {
-    console.error('Firebase Admin missing environment variables:', {
-      hasProjectId: !!projectId,
-      hasClientEmail: !!clientEmail,
-      hasPrivateKey: !!privateKeyRaw,
-    });
-    return null;
-  }
 
   try {
+    const privateKey = getPrivateKey();
+
+    if (!projectId || !clientEmail || !privateKey) {
+      console.error('Firebase Admin missing environment variables:', {
+        hasProjectId: !!projectId,
+        hasClientEmail: !!clientEmail,
+        hasPrivateKey: !!privateKey,
+      });
+      return null;
+    }
+
     if (!getApps().length) {
-      const formattedKey = formatPrivateKey(privateKeyRaw);
       initializeApp({
         credential: cert({
           projectId,
           clientEmail,
-          privateKey: formattedKey,
+          privateKey,
         }),
       });
     }
