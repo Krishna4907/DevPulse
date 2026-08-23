@@ -20,7 +20,7 @@ import {
   limitToLast,
   getDoc,
 } from 'firebase/firestore';
-import { Project, ProjectMember, Task, ChatMessage, Presence } from '@/lib/types';
+import { Project, ProjectMember, Task, ChatMessage, Presence, Blocker } from '@/lib/types';
 import { scoreMembers } from '@/lib/scoring';
 import Link from 'next/link';
 
@@ -82,6 +82,20 @@ export default function ProjectPage() {
   const [copiedWebhookUrl, setCopiedWebhookUrl] = useState(false);
   const [copiedWebhookSecret, setCopiedWebhookSecret] = useState(false);
   const [copiedWebhookContentType, setCopiedWebhookContentType] = useState(false);
+
+  // Phase 5 & 6: Leader Dashboard, Blockers & AI Diagnosis state
+  const [viewMode, setViewMode] = useState<'board' | 'dashboard'>('board');
+  const [filterMemberId, setFilterMemberId] = useState<string | null>(null);
+  const [blockers, setBlockers] = useState<Blocker[]>([]);
+  const [isBlockerModalOpen, setIsBlockerModalOpen] = useState(false);
+  const [selectedBlockerTask, setSelectedBlockerTask] = useState<Task | null>(null);
+  const [blockerDescription, setBlockerDescription] = useState('');
+  const [blockerType, setBlockerType] = useState<'Technical error' | 'Unclear requirement' | 'Need review' | 'Waiting on teammate'>('Technical error');
+  const [blockerNotifyWhole, setBlockerNotifyWhole] = useState(false);
+  const [blockerSubmitting, setBlockerSubmitting] = useState(false);
+  const [blockerSuccessMessage, setBlockerSuccessMessage] = useState<string | null>(null);
+  const [recentAiDiagnosis, setRecentAiDiagnosis] = useState<{ causes: string[]; fix: string; resource?: string } | null>(null);
+  const [resolvingBlockerId, setResolvingBlockerId] = useState<string | null>(null);
 
   // Redirect if not logged in
   useEffect(() => {
@@ -389,6 +403,166 @@ export default function ProjectPage() {
     const diffHours = Math.floor(diffMins / 60);
     if (diffHours < 24) return `Last seen ${diffHours}h ago`;
     return `Last seen ${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+  };
+
+  // Phase 5: Blockers listener across all project tasks
+  useEffect(() => {
+    if (!projectId || tasks.length === 0) {
+      setBlockers([]);
+      return;
+    }
+
+    const unsubs: (() => void)[] = [];
+    const taskBlockersMap: Record<string, Blocker[]> = {};
+
+    tasks.forEach((task) => {
+      const qBlockers = collection(db, 'projects', projectId, 'tasks', task.id, 'blockers');
+      const unsub = onSnapshot(
+        qBlockers,
+        (snapshot) => {
+          const list: Blocker[] = [];
+          snapshot.forEach((d) => {
+            list.push({
+              id: d.id,
+              taskId: task.id,
+              taskTitle: task.title,
+              projectId,
+              ...d.data(),
+            } as Blocker);
+          });
+          taskBlockersMap[task.id] = list;
+          const allBlockers = Object.values(taskBlockersMap).flat();
+          setBlockers(allBlockers);
+        },
+        (err) => console.warn(`Blockers listener notice for task ${task.id}:`, err.message)
+      );
+      unsubs.push(unsub);
+    });
+
+    return () => {
+      unsubs.forEach((u) => u());
+    };
+  }, [projectId, tasks]);
+
+  // Computed values for dashboard & blockers
+  const unresolvedBlockers = blockers.filter((b) => !b.resolved);
+  const tasksWithBlockerCount = tasks.filter(
+    (t) => t.hasBlocker || blockers.some((b) => b.taskId === t.id && !b.resolved)
+  ).length;
+
+  const filteredTasks = filterMemberId
+    ? tasks.filter((t) => t.assigneeId === filterMemberId || t.partnerId === filterMemberId)
+    : tasks;
+
+  // Open Blocker Modal
+  const handleOpenBlockerModal = (task: Task) => {
+    setSelectedBlockerTask(task);
+    setBlockerDescription('');
+    setBlockerType('Technical error');
+    setBlockerNotifyWhole(false);
+    setBlockerSuccessMessage(null);
+    setRecentAiDiagnosis(null);
+    setIsBlockerModalOpen(true);
+  };
+
+  // Submit Blocker with AI Diagnosis
+  const handleRaiseBlocker = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedBlockerTask || !blockerDescription.trim() || blockerSubmitting || !user) return;
+
+    setBlockerSubmitting(true);
+    setBlockerSuccessMessage('Blocker raised. AI is diagnosing...');
+    setRecentAiDiagnosis(null);
+
+    const taskId = selectedBlockerTask.id;
+
+    try {
+      // 1. Save blocker document
+      const blockerRef = await addDoc(
+        collection(db, 'projects', projectId, 'tasks', taskId, 'blockers'),
+        {
+          userId: user.uid,
+          userName: user.displayName || 'Developer',
+          userImage: user.photoURL || '',
+          description: blockerDescription.trim(),
+          type: blockerType,
+          notifyWhole: blockerNotifyWhole,
+          resolved: false,
+          aiDiagnosis: null,
+          createdAt: serverTimestamp(),
+        }
+      );
+
+      // 2. Update task hasBlocker flag & blockerCount
+      const taskRef = doc(db, 'projects', projectId, 'tasks', taskId);
+      await updateDoc(taskRef, {
+        hasBlocker: true,
+        blockerCount: increment(1),
+      });
+
+      // 3. Call AI diagnosis API
+      try {
+        const diagRes = await fetch('/api/diagnose-blocker', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            taskTitle: selectedBlockerTask.title,
+            taskSkills: selectedBlockerTask.skills,
+            blockerDescription: blockerDescription.trim(),
+            blockerType,
+          }),
+        });
+
+        if (diagRes.ok) {
+          const diagData = await diagRes.json();
+          if (diagData?.diagnosis) {
+            setRecentAiDiagnosis(diagData.diagnosis);
+            // Save diagnosis to blocker doc
+            await updateDoc(blockerRef, {
+              aiDiagnosis: diagData.diagnosis,
+            });
+          }
+        }
+      } catch (aiErr) {
+        console.error('Error getting AI diagnosis:', aiErr);
+      }
+
+      setBlockerSuccessMessage('Blocker submitted and AI diagnosis generated!');
+    } catch (err: any) {
+      console.error('Error raising blocker:', err);
+      alert('Failed to raise blocker. Please try again.');
+      setBlockerSuccessMessage(null);
+    } finally {
+      setBlockerSubmitting(false);
+    }
+  };
+
+  // Mark Blocker as Resolved
+  const handleResolveBlocker = async (blocker: Blocker) => {
+    if (!blocker.taskId || !blocker.id) return;
+    setResolvingBlockerId(blocker.id);
+
+    try {
+      // 1. Mark blocker resolved
+      const blockerRef = doc(db, 'projects', projectId, 'tasks', blocker.taskId, 'blockers', blocker.id);
+      await updateDoc(blockerRef, {
+        resolved: true,
+      });
+
+      // 2. Update task blocker count & flag
+      const taskRef = doc(db, 'projects', projectId, 'tasks', blocker.taskId);
+      const remainingForTask = blockers.filter((b) => b.taskId === blocker.taskId && !b.resolved && b.id !== blocker.id);
+
+      await updateDoc(taskRef, {
+        blockerCount: increment(-1),
+        hasBlocker: remainingForTask.length > 0,
+      });
+    } catch (err: any) {
+      console.error('Error resolving blocker:', err);
+      alert('Failed to resolve blocker. Please try again.');
+    } finally {
+      setResolvingBlockerId(null);
+    }
   };
 
   // Check if current user is a member or leader
@@ -872,6 +1046,44 @@ export default function ProjectPage() {
             )}
           </div>
 
+          {/* View Toggle (Leader only) */}
+          {isLeader && (
+            <div className="flex items-center bg-zinc-900 border border-zinc-800 p-0.5 rounded-xl">
+              <button
+                type="button"
+                onClick={() => setViewMode('board')}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === 'board'
+                    ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(124,58,237,0.3)]'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 4.5v15m6-15v15m-10.875 0h17.75c.621 0 1.125-.504 1.125-1.125V5.625c0-.621-.504-1.125-1.125-1.125H4.125C3.504 4.5 3 5.004 3 5.625v12.75c0 .621.504 1.125 1.125 1.125Z" />
+                </svg>
+                <span>Board view</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setViewMode('dashboard')}
+                className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === 'dashboard'
+                    ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(124,58,237,0.3)]'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3v11.25A2.25 2.25 0 0 0 6 16.5h2.25M3.75 3h-1.5m1.5 0h16.5m0 0h1.5m-1.5 0v11.25A2.25 2.25 0 0 1 18 16.5h-2.25m-7.5 0h7.5m-7.5 0-1 3m8.5-3 1 3m0 0 .5 1.5m-.5-1.5h-9.5m0 0-.5 1.5M9 11.25v1.5M12 9v3.75m3-6v6" />
+                </svg>
+                <span>Dashboard view</span>
+                {unresolvedBlockers.length > 0 && (
+                  <span className="flex h-2 w-2 rounded-full bg-rose-500 animate-ping" />
+                )}
+              </button>
+            </div>
+          )}
+
           {/* Setup Webhook Button (Leader only) */}
           {isLeader && (
             <button
@@ -1076,260 +1288,873 @@ export default function ProjectPage() {
             </div>
           </div>
 
-          {/* Main Content: Flexible Board & Collapsible Team Panel */}
+          {/* Main Content: Flexible Board/Dashboard & Collapsible Team Panel */}
           <div className="flex-1 flex flex-col lg:flex-row gap-6 w-full items-start">
             
-            {/* KANBAN BOARD CONTAINER (Flexes to fill 100% when Team Panel is closed) */}
-            <div className="flex-1 w-full min-w-0 flex flex-col">
-              <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
-                {/* Columns definition */}
-                {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
-                  const statusTasks = tasksByStatus(status);
-                  const columnName =
-                    status === 'todo'
-                      ? 'To Do'
-                      : status === 'inprogress'
-                      ? 'In Progress'
-                      : status === 'inreview'
-                      ? 'In Review'
-                      : 'Done';
+            {/* MAIN CONTENT AREA: Either Leader Dashboard View OR Kanban Board */}
+            <div className="flex-1 w-full min-w-0 flex flex-col gap-6">
 
-                  const columnColor =
-                    status === 'todo'
-                      ? 'border-zinc-800/80 bg-zinc-900/20'
-                      : status === 'inprogress'
-                      ? 'border-blue-900/30 bg-blue-950/10'
-                      : status === 'inreview'
-                      ? 'border-amber-900/30 bg-amber-950/10'
-                      : 'border-emerald-900/30 bg-emerald-950/10';
-
-                  const badgeColor =
-                    status === 'todo'
-                      ? 'bg-zinc-800 text-zinc-300'
-                      : status === 'inprogress'
-                      ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                      : status === 'inreview'
-                      ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                      : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
-
-                  return (
-                    <div
-                      key={status}
-                      className={`flex flex-col border rounded-2xl p-4 min-h-[420px] transition-all backdrop-blur-sm ${columnColor}`}
-                    >
-                      {/* Column Header */}
-                      <div className="flex items-center justify-between mb-4 border-b border-zinc-800/60 pb-3">
-                        <div className="flex items-center gap-2">
-                          <h3 className="font-bold text-sm text-zinc-200">{columnName}</h3>
-                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeColor}`}>
-                            {statusTasks.length}
-                          </span>
+              {/* ========================================================================= */}
+              {/* LEADER DASHBOARD VIEW (Phase 5 Feature) */}
+              {/* ========================================================================= */}
+              {isLeader && viewMode === 'dashboard' ? (
+                <div className="flex flex-col gap-6 w-full animate-fadeIn">
+                  
+                  {/* Alert Banner for Unresolved Blockers */}
+                  {unresolvedBlockers.length > 0 && (
+                    <div className="w-full bg-rose-500/10 border border-rose-500/30 p-4 rounded-2xl flex items-center justify-between gap-3 text-rose-300 shadow-[0_0_20px_rgba(244,63,94,0.15)] animate-fadeIn">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xl animate-bounce">⚠️</span>
+                        <div>
+                          <p className="font-bold text-sm text-white">
+                            {unresolvedBlockers.length} task(s) blocked — immediate attention needed
+                          </p>
+                          <p className="text-xs text-rose-400 mt-0.5">
+                            Team members have encountered obstacles and AI diagnosis is available below.
+                          </p>
                         </div>
-
-                        {status === 'todo' && (
-                          <button
-                            onClick={openAddTaskModal}
-                            className="text-zinc-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-zinc-800/60"
-                            title="Add task to To Do"
-                          >
-                            <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                            </svg>
-                          </button>
-                        )}
                       </div>
+                      <a
+                        href="#blockers-section"
+                        className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl text-xs font-bold transition-all shadow-[0_0_15px_rgba(244,63,94,0.3)] shrink-0 cursor-pointer"
+                      >
+                        Inspect Blockers
+                      </a>
+                    </div>
+                  )}
 
-                      {/* Tasks list with sleek dark scrollbar */}
-                      <div className="flex flex-col gap-3 flex-1 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
-                        {statusTasks.map((task) => {
-                          const assignee = members.find((m) => m.userId === task.assigneeId);
-                          const partner = members.find((m) => m.userId === task.partnerId);
+                  {/* A) TEAM OVERVIEW STAT CARDS */}
+                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                    {/* Card 1: Total Tasks */}
+                    <div className="bg-zinc-900/60 border border-zinc-800 p-4 rounded-2xl flex flex-col gap-1 backdrop-blur-sm">
+                      <span className="text-xs font-semibold text-zinc-400">Total Tasks</span>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-2xl font-extrabold text-white">{tasks.length}</span>
+                        <span className="text-[11px] text-zinc-500">in project</span>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-1 rounded-full mt-2 overflow-hidden">
+                        <div className="bg-violet-500 h-full w-full"></div>
+                      </div>
+                    </div>
+
+                    {/* Card 2: Done Tasks */}
+                    <div className="bg-zinc-900/60 border border-zinc-800 p-4 rounded-2xl flex flex-col gap-1 backdrop-blur-sm">
+                      <span className="text-xs font-semibold text-zinc-400">Done</span>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-2xl font-extrabold text-emerald-400">
+                          {tasks.filter((t) => t.status === 'done').length}
+                        </span>
+                        <span className="text-[11px] text-zinc-500">
+                          {tasks.length > 0
+                            ? `${Math.round((tasks.filter((t) => t.status === 'done').length / tasks.length) * 100)}%`
+                            : '0%'}
+                        </span>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-1 rounded-full mt-2 overflow-hidden">
+                        <div
+                          className="bg-emerald-500 h-full transition-all"
+                          style={{
+                            width: `${
+                              tasks.length > 0
+                                ? (tasks.filter((t) => t.status === 'done').length / tasks.length) * 100
+                                : 0
+                            }%`,
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+
+                    {/* Card 3: In Progress */}
+                    <div className="bg-zinc-900/60 border border-zinc-800 p-4 rounded-2xl flex flex-col gap-1 backdrop-blur-sm">
+                      <span className="text-xs font-semibold text-zinc-400">In Progress</span>
+                      <div className="flex items-baseline gap-2">
+                        <span className="text-2xl font-extrabold text-blue-400">
+                          {tasks.filter((t) => t.status === 'inprogress' || t.status === 'inreview').length}
+                        </span>
+                        <span className="text-[11px] text-zinc-500">active sprint</span>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-1 rounded-full mt-2 overflow-hidden">
+                        <div
+                          className="bg-blue-500 h-full transition-all"
+                          style={{
+                            width: `${
+                              tasks.length > 0
+                                ? ((tasks.filter((t) => t.status === 'inprogress' || t.status === 'inreview').length) /
+                                    tasks.length) *
+                                  100
+                                : 0
+                            }%`,
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+
+                    {/* Card 4: Blocked */}
+                    <div
+                      className={`border p-4 rounded-2xl flex flex-col gap-1 backdrop-blur-sm transition-all ${
+                        unresolvedBlockers.length > 0
+                          ? 'bg-rose-950/20 border-rose-500/40 shadow-[0_0_15px_rgba(244,63,94,0.15)]'
+                          : 'bg-zinc-900/60 border-zinc-800'
+                      }`}
+                    >
+                      <span className="text-xs font-semibold text-zinc-400">Blocked</span>
+                      <div className="flex items-baseline gap-2">
+                        <span
+                          className={`text-2xl font-extrabold ${
+                            unresolvedBlockers.length > 0 ? 'text-rose-400' : 'text-zinc-300'
+                          }`}
+                        >
+                          {unresolvedBlockers.length}
+                        </span>
+                        <span className="text-[11px] text-zinc-500">unresolved</span>
+                      </div>
+                      <div className="w-full bg-zinc-800 h-1 rounded-full mt-2 overflow-hidden">
+                        <div
+                          className={`h-full transition-all ${
+                            unresolvedBlockers.length > 0 ? 'bg-rose-500' : 'bg-zinc-600'
+                          }`}
+                          style={{
+                            width: `${
+                              tasks.length > 0 ? Math.min(100, (unresolvedBlockers.length / tasks.length) * 100) : 0
+                            }%`,
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* B) UNRESOLVED BLOCKERS SECTION */}
+                  <div id="blockers-section" className="bg-zinc-900/40 border border-zinc-800/80 rounded-2xl p-5 flex flex-col gap-4">
+                    <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400 border border-rose-500/20">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                          </svg>
+                        </div>
+                        <h3 className="text-base font-bold text-white">Active Blockers & AI Diagnostics</h3>
+                      </div>
+                      <span className="text-xs text-zinc-500">
+                        {unresolvedBlockers.length} active issue{unresolvedBlockers.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+
+                    {unresolvedBlockers.length === 0 ? (
+                      <div className="py-8 flex flex-col items-center justify-center text-center text-zinc-500">
+                        <div className="h-10 w-10 rounded-full bg-emerald-500/10 text-emerald-400 flex items-center justify-center mb-2 border border-emerald-500/20">
+                          ✓
+                        </div>
+                        <p className="text-xs font-semibold text-zinc-300">No active blockers!</p>
+                        <p className="text-[11px] text-zinc-500 mt-0.5">The team is progressing smoothly without impediments.</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {unresolvedBlockers.map((blocker) => {
+                          const task = tasks.find((t) => t.id === blocker.taskId);
+                          const member = members.find((m) => m.userId === blocker.userId);
 
                           return (
                             <div
-                              key={task.id}
-                              className="bg-zinc-900/70 border border-zinc-800 hover:border-zinc-700 p-4 rounded-xl shadow-lg transition-all flex flex-col gap-3 group text-left relative overflow-hidden"
+                              key={blocker.id}
+                              className="bg-zinc-950/80 border border-rose-500/30 rounded-2xl p-4 flex flex-col gap-3 shadow-lg relative overflow-hidden"
                             >
-                              <div className="min-w-0">
-                                <div className="flex justify-between items-start gap-2">
-                                  <h4 className="font-bold text-white text-sm line-clamp-2 leading-snug break-words">
-                                    {task.title}
-                                  </h4>
-                                  {/* Task Type Badge */}
-                                  {task.assigneeId && (
-                                    <span
-                                      className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider shrink-0 ${
-                                        task.type === 'safe'
-                                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
-                                          : task.type === 'stretch'
-                                          ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30'
-                                          : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                                      }`}
-                                    >
-                                      {task.type}
-                                    </span>
+                              {/* Top Bar */}
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  {member?.image ? (
+                                    <img src={member.image} alt={blocker.userName || ''} className="h-7 w-7 rounded-full border border-zinc-800 shrink-0" />
+                                  ) : (
+                                    <div className="h-7 w-7 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white shrink-0">
+                                      {blocker.userName ? blocker.userName[0] : 'U'}
+                                    </div>
                                   )}
-                                </div>
-
-                                {/* Git Branch Name in Monospace Font */}
-                                <div className="mt-1.5">
-                                  <span
-                                    title={task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
-                                    className="font-mono text-[10px] text-zinc-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-850 block truncate max-w-full"
-                                  >
-                                    {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
-                                  </span>
-                                </div>
-
-                                {/* Task ID copy reference */}
-                                <div className="mt-1.5 flex items-center justify-between gap-1.5 bg-zinc-950/80 border border-zinc-800/80 px-2 py-1 rounded-lg text-[10px]">
-                                  <div className="flex items-center gap-1 min-w-0">
-                                    <span className="text-zinc-500 text-[9px] font-medium shrink-0">Task ID:</span>
-                                    <code className="text-violet-300 font-mono text-[10px] truncate">{task.id}</code>
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-bold text-white block truncate">{blocker.userName || 'Developer'}</span>
+                                    <span className="text-[10px] text-zinc-500 block truncate">Task: {task?.title || blocker.taskTitle || blocker.taskId}</span>
                                   </div>
-                                  <button
-                                    type="button"
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      navigator.clipboard.writeText(task.id);
-                                      setCopiedTaskId(task.id);
-                                      setTimeout(() => setCopiedTaskId(null), 2000);
-                                    }}
-                                    className="shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer"
-                                  >
-                                    {copiedTaskId === task.id ? 'Copied!' : 'Copy'}
-                                  </button>
                                 </div>
-                                <p className="text-[9px] text-zinc-500 mt-1 italic leading-tight">
-                                  Use in commit: <span className="font-mono text-zinc-400">git commit -m &quot;feat: closes #{task.id}&quot;</span>
-                                </p>
 
-                                <p className="text-zinc-400 text-xs mt-2 line-clamp-2 break-words">
-                                  {task.description || 'No description provided.'}
-                                </p>
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 shrink-0">
+                                  {blocker.type}
+                                </span>
                               </div>
 
-                              {/* Skill Tags */}
-                              {task.skills.length > 0 && (
-                                <div className="flex flex-wrap gap-1">
-                                  {task.skills.map((skill, sIdx) => (
-                                    <span
-                                      key={sIdx}
-                                      className="bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded-md text-[9px] font-medium"
-                                    >
-                                      {skill}
+                              {/* Blocker Description */}
+                              <div className="p-2.5 rounded-xl bg-zinc-900/80 border border-zinc-800 text-xs text-zinc-300 leading-relaxed">
+                                &quot;{blocker.description}&quot;
+                              </div>
+
+                              {/* AI Diagnosis Block */}
+                              {blocker.aiDiagnosis && (
+                                <div className="p-3 rounded-xl bg-violet-950/20 border border-violet-500/30 flex flex-col gap-2">
+                                  <div className="flex items-center justify-between text-violet-300 font-bold text-xs">
+                                    <span className="flex items-center gap-1.5">
+                                      <span>✨ AI Diagnosis</span>
                                     </span>
-                                  ))}
+                                  </div>
+
+                                  {blocker.aiDiagnosis.causes && blocker.aiDiagnosis.causes.length > 0 && (
+                                    <div>
+                                      <span className="text-[10px] text-zinc-400 font-semibold">Probable Causes:</span>
+                                      <ul className="list-decimal list-inside text-[11px] text-zinc-300 space-y-0.5 mt-0.5">
+                                        {blocker.aiDiagnosis.causes.map((c: string, i: number) => (
+                                          <li key={i}>{c}</li>
+                                        ))}
+                                      </ul>
+                                    </div>
+                                  )}
+
+                                  {blocker.aiDiagnosis.fix && (
+                                    <div className="p-2 rounded-lg bg-zinc-950 border border-violet-500/20 text-xs text-emerald-300 font-mono">
+                                      💡 <strong className="text-emerald-200">Recommended Fix:</strong> {blocker.aiDiagnosis.fix}
+                                    </div>
+                                  )}
+
+                                  {blocker.aiDiagnosis.resource && (
+                                    <a
+                                      href={blocker.aiDiagnosis.resource}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-xs text-violet-400 hover:text-violet-300 underline inline-flex items-center gap-1 mt-0.5"
+                                    >
+                                      <span>🔗 Reference Documentation</span>
+                                    </a>
+                                  )}
                                 </div>
                               )}
 
-                              {/* Assignee / Partner information */}
-                              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/50 pt-3 mt-1">
-                                <div className="flex items-center gap-2 min-w-0">
-                                  {task.assigneeId ? (
-                                    <div className="flex items-center gap-1.5 min-w-0">
-                                      <div className="flex -space-x-1.5 items-center shrink-0">
-                                        {assignee?.image ? (
-                                          <img
-                                            src={assignee.image}
-                                            alt={assignee.name}
-                                            title={`Driver: ${assignee.name}`}
-                                            className="h-6 w-6 rounded-full border border-zinc-800"
-                                          />
-                                        ) : (
-                                          <div
-                                            title={`Driver: ${assignee?.name || 'Developer'}`}
-                                            className="h-6 w-6 rounded-full bg-violet-600/30 text-violet-300 border border-violet-500/30 flex items-center justify-center text-[10px] font-bold"
-                                          >
-                                            {assignee?.name ? assignee.name[0] : 'D'}
-                                          </div>
-                                        )}
-                                        {partner && (
-                                          partner.image ? (
-                                            <img
-                                              src={partner.image}
-                                              alt={partner.name}
-                                              title={`Navigator: ${partner.name}`}
-                                              className="h-6 w-6 rounded-full border border-zinc-800"
-                                            />
-                                          ) : (
-                                            <div
-                                              title={`Navigator: ${partner.name || 'Partner'}`}
-                                              className="h-6 w-6 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold"
-                                            >
-                                              {partner.name ? partner.name[0] : 'N'}
-                                            </div>
-                                          )
-                                        )}
-                                      </div>
-                                      <span className="text-[10px] text-zinc-300 font-medium truncate max-w-[90px]">
-                                        {assignee?.name}
-                                        {partner ? ` + ${partner.name}` : ''}
-                                      </span>
-                                    </div>
-                                  ) : (
-                                    <span className="text-[10px] text-zinc-500 italic bg-zinc-950/60 border border-zinc-800/80 px-2 py-0.5 rounded">
-                                      Unassigned
-                                    </span>
-                                  )}
-
-                                  {/* Leader Assign / Reassign Button */}
-                                  {isLeader && (
-                                    <button
-                                      onClick={() => openAssignModal(task)}
-                                      className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
-                                      title={task.assigneeId ? "Reassign Task" : "Assign Task"}
-                                    >
-                                      <span>{task.assigneeId ? 'Reassign' : 'Assign'}</span>
-                                    </button>
-                                  )}
-                                </div>
-
-                                {/* Status mover selection */}
-                                <select
-                                  value={task.status}
-                                  onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value as Task['status'])}
-                                  className="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white px-2 py-1 rounded outline-none transition-colors ml-auto"
+                              {/* Action: Mark Resolved */}
+                              <div className="flex justify-end pt-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleResolveBlocker(blocker)}
+                                  disabled={resolvingBlockerId === blocker.id}
+                                  className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold transition-all shadow-[0_0_12px_rgba(16,185,129,0.25)] flex items-center gap-1.5 cursor-pointer"
                                 >
-                                  <option value="todo">To Do</option>
-                                  <option value="inprogress">In Progress</option>
-                                  <option value="inreview">In Review</option>
-                                  <option value="done">Done</option>
-                                </select>
+                                  {resolvingBlockerId === blocker.id ? (
+                                    <>
+                                      <div className="h-3 w-3 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                                      <span>Resolving...</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span>✓ Mark Resolved</span>
+                                    </>
+                                  )}
+                                </button>
                               </div>
                             </div>
                           );
                         })}
+                      </div>
+                    )}
+                  </div>
 
-                        {statusTasks.length === 0 && (
-                          <div className="flex flex-col items-center justify-center py-10 text-center text-zinc-600 border border-dashed border-zinc-800/60 rounded-xl">
-                            <span className="text-xs">No tasks</span>
+                  {/* C) MEMBER ACTIVITY LIST */}
+                  <div className="bg-zinc-900/40 border border-zinc-800/80 rounded-2xl p-5 flex flex-col gap-4">
+                    <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+                          </svg>
+                        </div>
+                        <h3 className="text-base font-bold text-white">Member Activity & Progress</h3>
+                      </div>
+                      <span className="text-xs text-zinc-500">{members.length} team members</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {members.map((member) => {
+                        const assignedTasks = tasks.filter((t) => t.assigneeId === member.userId || t.partnerId === member.userId);
+                        const completedTasks = assignedTasks.filter((t) => t.status === 'done');
+                        const hasActiveBlocker = assignedTasks.some((t) => blockers.some((b) => b.taskId === t.id && !b.resolved));
+                        const isOnline = Boolean(presenceMap[member.userId]?.online);
+
+                        // Find latest commit info
+                        const latestCommitTask = assignedTasks.find((t) => t.lastCommit?.sha);
+
+                        return (
+                          <div key={member.id} className="bg-zinc-950/60 border border-zinc-800 p-4 rounded-2xl flex flex-col gap-3">
+                            {/* Member Top Bar */}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                {member.image ? (
+                                  <img src={member.image} alt={member.name} className="h-8 w-8 rounded-full border border-zinc-800 shrink-0" />
+                                ) : (
+                                  <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-white shrink-0">
+                                    {member.name ? member.name[0] : 'U'}
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="font-bold text-xs text-white truncate">{member.name || 'Developer'}</span>
+                                    <span
+                                      className={`px-1.5 py-0.2 rounded text-[8px] font-bold uppercase tracking-wider ${
+                                        member.role === 'leader'
+                                          ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
+                                          : 'bg-zinc-800 text-zinc-400'
+                                      }`}
+                                    >
+                                      {member.role}
+                                    </span>
+                                  </div>
+                                  <span className="text-[10px] text-zinc-500 block truncate">{member.email}</span>
+                                </div>
+                              </div>
+
+                              {/* Status badge: Blocked / Active / Idle */}
+                              {hasActiveBlocker ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/15 text-rose-400 border border-rose-500/30 flex items-center gap-1">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-rose-400 animate-ping"></span>
+                                  Blocked
+                                </span>
+                              ) : isOnline ? (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                                  Active
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-zinc-800 text-zinc-400">
+                                  Idle
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Task Progress Bar */}
+                            <div className="flex flex-col gap-1 mt-1">
+                              <div className="flex justify-between text-[11px] text-zinc-400">
+                                <span>Task Completion</span>
+                                <span className="font-semibold text-zinc-200">
+                                  {completedTasks.length} / {assignedTasks.length} ({assignedTasks.length > 0 ? Math.round((completedTasks.length / assignedTasks.length) * 100) : 0}%)
+                                </span>
+                              </div>
+                              <div className="w-full bg-zinc-900 h-1.5 rounded-full overflow-hidden border border-zinc-800">
+                                <div
+                                  className="bg-gradient-to-r from-violet-500 to-emerald-400 h-full transition-all"
+                                  style={{
+                                    width: `${assignedTasks.length > 0 ? (completedTasks.length / assignedTasks.length) * 100 : 0}%`,
+                                  }}
+                                ></div>
+                              </div>
+                            </div>
+
+                            {/* Latest Commit Snippet (if available) */}
+                            {latestCommitTask?.lastCommit && (
+                              <div className="p-2 rounded-xl bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-400 flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <span className="text-zinc-500 shrink-0">Commit:</span>
+                                  <span className="font-mono text-zinc-300 truncate">{latestCommitTask.lastCommit.message}</span>
+                                </div>
+                                <code className="text-[9px] text-violet-400 font-mono shrink-0">
+                                  {latestCommitTask.lastCommit.sha.slice(0, 7)}
+                                </code>
+                              </div>
+                            )}
+
+                            {/* Skills Gained Tags */}
+                            <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                              <span className="text-[10px] text-zinc-500 mr-1">Skills:</span>
+                              {member.skills && member.skills.length > 0 ? (
+                                member.skills.map((skill, skIdx) => (
+                                  <span
+                                    key={skIdx}
+                                    className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded text-[9px] font-medium"
+                                  >
+                                    {skill}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-[10px] text-zinc-600 italic">No skills recorded yet</span>
+                              )}
+                            </div>
+
+                            {/* View Tasks Action Button */}
+                            <div className="flex justify-end pt-1 border-t border-zinc-800/40">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setFilterMemberId(member.userId);
+                                  setViewMode('board');
+                                }}
+                                className="text-xs text-violet-400 hover:text-violet-300 font-semibold flex items-center gap-1 hover:underline cursor-pointer"
+                              >
+                                <span>View tasks ({assignedTasks.length}) →</span>
+                              </button>
+                            </div>
                           </div>
-                        )}
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* D) SKILL COVERAGE MATRIX */}
+                  <div className="bg-zinc-900/40 border border-zinc-800/80 rounded-2xl p-5 flex flex-col gap-4 overflow-x-auto">
+                    <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 0 1 6 3.75h2.25A2.25 2.25 0 0 1 10.5 6v2.25a2.25 2.25 0 0 1-2.25 2.25H6a2.25 2.25 0 0 1-2.25-2.25V6ZM3.75 15.75A2.25 2.25 0 0 1 6 13.5h2.25a2.25 2.25 0 0 1 2.25 2.25V18a2.25 2.25 0 0 1-2.25 2.25H6A2.25 2.25 0 0 1 3.75 18v-2.25ZM13.5 6a2.25 2.25 0 0 1 2.25-2.25H18A2.25 2.25 0 0 1 20.25 6v2.25A2.25 2.25 0 0 1 18 10.5h-2.25a2.25 2.25 0 0 1-2.25-2.25V6ZM13.5 15.75a2.25 2.25 0 0 1 2.25-2.25H18a2.25 2.25 0 0 1 2.25 2.25V18A2.25 2.25 0 0 1 18 20.25h-2.25A2.25 2.25 0 0 1 13.5 18v-2.25Z" />
+                          </svg>
+                        </div>
+                        <div>
+                          <h3 className="text-base font-bold text-white">Skill Coverage Matrix</h3>
+                          <p className="text-xs text-zinc-500 mt-0.5">Instant team capability & tech stack gap analysis</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="border-b border-zinc-800 text-zinc-400">
+                            <th className="py-2.5 px-3 font-semibold">Team Member</th>
+                            {project.techStack && project.techStack.map((tech, tIdx) => (
+                              <th key={tIdx} className="py-2.5 px-3 font-semibold text-center">
+                                <span className="px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-zinc-300">
+                                  {tech}
+                                </span>
+                              </th>
+                            ))}
+                            <th className="py-2.5 px-3 font-semibold text-right">Total Skills</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-zinc-800/40">
+                          {members.map((member) => (
+                            <tr key={member.id} className="hover:bg-zinc-900/30 transition-colors">
+                              <td className="py-3 px-3">
+                                <div className="flex items-center gap-2">
+                                  {member.image ? (
+                                    <img src={member.image} alt={member.name} className="h-6 w-6 rounded-full border border-zinc-800" />
+                                  ) : (
+                                    <div className="h-6 w-6 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] font-bold text-white">
+                                      {member.name ? member.name[0] : 'U'}
+                                    </div>
+                                  )}
+                                  <span className="font-semibold text-white truncate">{member.name}</span>
+                                </div>
+                              </td>
+                              {project.techStack && project.techStack.map((tech, tIdx) => {
+                                const hasSkill = (member.skills || []).includes(tech);
+                                return (
+                                  <td key={tIdx} className="py-3 px-3 text-center">
+                                    {hasSkill ? (
+                                      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-emerald-500/20 text-emerald-400 font-bold text-xs border border-emerald-500/40">
+                                        ✓
+                                      </span>
+                                    ) : (
+                                      <span className="text-zinc-600 font-bold">—</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td className="py-3 px-3 text-right font-semibold text-zinc-300">
+                                {member.skills?.length || 0}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* ========================================================================= */
+                /* KANBAN BOARD VIEW & MEMBER DASHBOARD */
+                /* ========================================================================= */
+                <div className="flex flex-col gap-6 w-full animate-fadeIn">
+                  
+                  {/* Member Task Filter Banner (when filterMemberId is active) */}
+                  {filterMemberId && (
+                    <div className="flex items-center justify-between bg-violet-950/30 border border-violet-500/30 px-4 py-2.5 rounded-xl text-xs">
+                      <div className="flex items-center gap-2 text-violet-200">
+                        <span>🎯 Filtering board for: <strong>{members.find((m) => m.userId === filterMemberId)?.name || 'Member'}</strong></span>
+                      </div>
+                      <button
+                        onClick={() => setFilterMemberId(null)}
+                        className="text-xs text-violet-400 hover:text-white font-bold underline cursor-pointer"
+                      >
+                        Clear Filter (Show All)
+                      </button>
+                    </div>
+                  )}
+
+                  {/* 4 Kanban Columns */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-4 gap-4 w-full">
+                    {(['todo', 'inprogress', 'inreview', 'done'] as Task['status'][]).map((status) => {
+                      const statusTasks = filteredTasks.filter((t) => t.status === status);
+                      const columnName =
+                        status === 'todo'
+                          ? 'To Do'
+                          : status === 'inprogress'
+                          ? 'In Progress'
+                          : status === 'inreview'
+                          ? 'In Review'
+                          : 'Done';
+
+                      const columnColor =
+                        status === 'todo'
+                          ? 'border-zinc-800/80 bg-zinc-900/20'
+                          : status === 'inprogress'
+                          ? 'border-blue-900/30 bg-blue-950/10'
+                          : status === 'inreview'
+                          ? 'border-amber-900/30 bg-amber-950/10'
+                          : 'border-emerald-900/30 bg-emerald-950/10';
+
+                      const badgeColor =
+                        status === 'todo'
+                          ? 'bg-zinc-800 text-zinc-300'
+                          : status === 'inprogress'
+                          ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                          : status === 'inreview'
+                          ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                          : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30';
+
+                      return (
+                        <div
+                          key={status}
+                          className={`flex flex-col border rounded-2xl p-4 min-h-[420px] transition-all backdrop-blur-sm ${columnColor}`}
+                        >
+                          {/* Column Header */}
+                          <div className="flex items-center justify-between mb-4 border-b border-zinc-800/60 pb-3">
+                            <div className="flex items-center gap-2">
+                              <h3 className="font-bold text-sm text-zinc-200">{columnName}</h3>
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeColor}`}>
+                                {statusTasks.length}
+                              </span>
+                            </div>
+
+                            {status === 'todo' && (
+                              <button
+                                onClick={openAddTaskModal}
+                                className="text-zinc-400 hover:text-white transition-colors p-1 rounded-lg hover:bg-zinc-800/60 cursor-pointer"
+                                title="Add task to To Do"
+                              >
+                                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+
+                          {/* Tasks list */}
+                          <div className="flex flex-col gap-3 flex-1 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
+                            {statusTasks.map((task) => {
+                              const assignee = members.find((m) => m.userId === task.assigneeId);
+                              const partner = members.find((m) => m.userId === task.partnerId);
+                              const isMyTask = task.assigneeId === user?.uid;
+                              const taskBlockers = blockers.filter((b) => b.taskId === task.id && !b.resolved);
+                              const isTaskBlocked = task.hasBlocker || taskBlockers.length > 0;
+
+                              return (
+                                <div
+                                  key={task.id}
+                                  className={`bg-zinc-900/70 border ${
+                                    isTaskBlocked ? 'border-rose-500/40 bg-rose-950/10' : 'border-zinc-800 hover:border-zinc-700'
+                                  } p-4 rounded-xl shadow-lg transition-all flex flex-col gap-3 group text-left relative overflow-hidden`}
+                                >
+                                  <div className="min-w-0">
+                                    <div className="flex justify-between items-start gap-2">
+                                      <h4 className="font-bold text-white text-sm line-clamp-2 leading-snug break-words">
+                                        {task.title}
+                                      </h4>
+                                      <div className="flex items-center gap-1 shrink-0">
+                                        {/* Blocker Alert Badge */}
+                                        {isTaskBlocked && (
+                                          <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse">
+                                            ⚠️ Blocked
+                                          </span>
+                                        )}
+                                        {/* Task Type Badge */}
+                                        {task.assigneeId && (
+                                          <span
+                                            className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider ${
+                                              task.type === 'safe'
+                                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                                : task.type === 'stretch'
+                                                ? 'bg-violet-500/15 text-violet-400 border border-violet-500/30'
+                                                : 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                                            }`}
+                                          >
+                                            {task.type}
+                                          </span>
+                                        )}
+                                      </div>
+                                    </div>
+
+                                    {/* Git Branch Name */}
+                                    <div className="mt-1.5">
+                                      <span
+                                        title={task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
+                                        className="font-mono text-[10px] text-zinc-400 bg-zinc-950 px-2 py-0.5 rounded border border-zinc-850 block truncate max-w-full"
+                                      >
+                                        {task.branchName || `feat/${task.title.toLowerCase().trim().replace(/\s+/g, '-')}`}
+                                      </span>
+                                    </div>
+
+                                    {/* Task ID copy reference */}
+                                    <div className="mt-1.5 flex items-center justify-between gap-1.5 bg-zinc-950/80 border border-zinc-800/80 px-2 py-1 rounded-lg text-[10px]">
+                                      <div className="flex items-center gap-1 min-w-0">
+                                        <span className="text-zinc-500 text-[9px] font-medium shrink-0">Task ID:</span>
+                                        <code className="text-violet-300 font-mono text-[10px] truncate">{task.id}</code>
+                                      </div>
+                                      <button
+                                        type="button"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          navigator.clipboard.writeText(task.id);
+                                          setCopiedTaskId(task.id);
+                                          setTimeout(() => setCopiedTaskId(null), 2000);
+                                        }}
+                                        className="shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition-colors cursor-pointer"
+                                      >
+                                        {copiedTaskId === task.id ? 'Copied!' : 'Copy'}
+                                      </button>
+                                    </div>
+
+                                    <p className="text-zinc-400 text-xs mt-2 line-clamp-2 break-words">
+                                      {task.description || 'No description provided.'}
+                                    </p>
+                                  </div>
+
+                                  {/* Skill Tags */}
+                                  {task.skills.length > 0 && (
+                                    <div className="flex flex-wrap gap-1">
+                                      {task.skills.map((skill, sIdx) => (
+                                        <span
+                                          key={sIdx}
+                                          className="bg-violet-500/10 text-violet-300 border border-violet-500/20 px-2 py-0.5 rounded-md text-[9px] font-medium"
+                                        >
+                                          {skill}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  {/* AI Diagnosis Snippet on Card (if blocker diagnosed) */}
+                                  {taskBlockers.map((b) => b.aiDiagnosis && (
+                                    <div key={b.id} className="p-2.5 rounded-xl bg-violet-950/20 border border-violet-500/30 text-xs flex flex-col gap-1.5">
+                                      <div className="flex items-center justify-between text-violet-300 font-bold text-[11px]">
+                                        <span>✨ AI Diagnosis</span>
+                                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-violet-500/20 text-violet-300">{b.type}</span>
+                                      </div>
+                                      {b.aiDiagnosis.fix && (
+                                        <div className="p-1.5 rounded-lg bg-zinc-950/80 border border-violet-500/20 text-[10px] text-emerald-300 font-mono leading-tight">
+                                          💡 {b.aiDiagnosis.fix}
+                                        </div>
+                                      )}
+                                      {b.aiDiagnosis.resource && (
+                                        <a
+                                          href={b.aiDiagnosis.resource}
+                                          target="_blank"
+                                          rel="noreferrer"
+                                          className="text-[10px] text-violet-400 hover:text-violet-300 underline inline-flex items-center gap-1"
+                                        >
+                                          <span>🔗 Resource Docs</span>
+                                        </a>
+                                      )}
+                                    </div>
+                                  ))}
+
+                                  {/* Assignee / Partner information */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2 border-t border-zinc-800/50 pt-3 mt-1">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      {task.assigneeId ? (
+                                        <div className="flex items-center gap-1.5 min-w-0">
+                                          <div className="flex -space-x-1.5 items-center shrink-0">
+                                            {assignee?.image ? (
+                                              <img
+                                                src={assignee.image}
+                                                alt={assignee.name}
+                                                title={`Driver: ${assignee.name}`}
+                                                className="h-6 w-6 rounded-full border border-zinc-800"
+                                              />
+                                            ) : (
+                                              <div
+                                                title={`Driver: ${assignee?.name || 'Developer'}`}
+                                                className="h-6 w-6 rounded-full bg-violet-600/30 text-violet-300 border border-violet-500/30 flex items-center justify-center text-[10px] font-bold"
+                                              >
+                                                {assignee?.name ? assignee.name[0] : 'D'}
+                                              </div>
+                                            )}
+                                            {partner && (
+                                              partner.image ? (
+                                                <img
+                                                  src={partner.image}
+                                                  alt={partner.name}
+                                                  title={`Navigator: ${partner.name}`}
+                                                  className="h-6 w-6 rounded-full border border-zinc-800"
+                                                />
+                                              ) : (
+                                                <div
+                                                  title={`Navigator: ${partner.name || 'Partner'}`}
+                                                  className="h-6 w-6 rounded-full bg-indigo-600/30 text-indigo-300 border border-indigo-500/30 flex items-center justify-center text-[10px] font-bold"
+                                                >
+                                                  {partner.name ? partner.name[0] : 'N'}
+                                                </div>
+                                              )
+                                            )}
+                                          </div>
+                                          <span className="text-[10px] text-zinc-300 font-medium truncate max-w-[90px]">
+                                            {assignee?.name}
+                                            {partner ? ` + ${partner.name}` : ''}
+                                          </span>
+                                        </div>
+                                      ) : (
+                                        <span className="text-[10px] text-zinc-500 italic bg-zinc-950/60 border border-zinc-800/80 px-2 py-0.5 rounded">
+                                          Unassigned
+                                        </span>
+                                      )}
+
+                                      {/* Leader Assign / Reassign Button */}
+                                      {isLeader && (
+                                        <button
+                                          onClick={() => openAssignModal(task)}
+                                          className="text-[10px] font-semibold text-violet-400 hover:text-violet-300 hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
+                                          title={task.assigneeId ? "Reassign Task" : "Assign Task"}
+                                        >
+                                          <span>{task.assigneeId ? 'Reassign' : 'Assign'}</span>
+                                        </button>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5 ml-auto">
+                                      {/* Raise Blocker Button (Visible to assignee) */}
+                                      {isMyTask && task.status !== 'done' && (
+                                        <button
+                                          type="button"
+                                          onClick={() => handleOpenBlockerModal(task)}
+                                          className="text-[10px] font-semibold text-rose-400 hover:text-rose-300 bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/20 px-2 py-1 rounded-lg transition-all cursor-pointer"
+                                          title="Raise a blocker on this task"
+                                        >
+                                          ⚠️ Blocker
+                                        </button>
+                                      )}
+
+                                      {/* Status mover selection */}
+                                      <select
+                                        value={task.status}
+                                        onChange={(e) => handleUpdateTaskStatus(task.id, e.target.value as Task['status'])}
+                                        className="bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white px-2 py-1 rounded outline-none transition-colors"
+                                      >
+                                        <option value="todo">To Do</option>
+                                        <option value="inprogress">In Progress</option>
+                                        <option value="inreview">In Review</option>
+                                        <option value="done">Done</option>
+                                      </select>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+
+                            {statusTasks.length === 0 && (
+                              <div className="flex flex-col items-center justify-center py-10 text-center text-zinc-600 border border-dashed border-zinc-800/60 rounded-xl">
+                                <span className="text-xs">No tasks</span>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Add Task Trigger (Only in To Do column) */}
+                          {status === 'todo' && (
+                            <button
+                              onClick={openAddTaskModal}
+                              className="mt-4 flex w-full items-center justify-center gap-1.5 border border-dashed border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/30 rounded-xl py-2.5 text-xs text-zinc-500 hover:text-zinc-300 transition-all font-semibold cursor-pointer"
+                            >
+                              <svg
+                                className="h-3.5 w-3.5"
+                                fill="none"
+                                viewBox="0 0 24 24"
+                                stroke="currentColor"
+                                strokeWidth={2.5}
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                              </svg>
+                              <span>Add Task</span>
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* 6. MEMBER SIDE: "MY PROGRESS" SECTION */}
+                  {currentMember && (
+                    <div className="bg-zinc-900/30 border border-zinc-800/80 rounded-2xl p-5 flex flex-col gap-4 mt-2">
+                      <div className="flex items-center justify-between border-b border-zinc-800/80 pb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="p-1.5 rounded-lg bg-violet-500/10 text-violet-400 border border-violet-500/20">
+                            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M4.26 10.147a60.438 60.438 0 0 0-.491 6.347A48.62 48.62 0 0 1 12 20.9m10-10.753a60.47 60.47 0 0 1-.49 6.347m-18 .003a3.375 3.375 0 0 0-3.375-3.375H4.83c-.06 3.003.079 6.006.418 8.975M22.007 10.14c.007-.122.012-.244.012-.368A4.498 4.498 0 0 0 17.5 5.25a4.498 4.498 0 0 0-4.5 4.5v.015m7.5-.015a8.607 8.607 0 0 1-7.5 0" />
+                            </svg>
+                          </div>
+                          <div>
+                            <h3 className="text-base font-bold text-white">My Progress & Skill Growth</h3>
+                            <p className="text-xs text-zinc-500">Your personalized calibration and project contributions</p>
+                          </div>
+                        </div>
                       </div>
 
-                      {/* Add Task Trigger (Only in To Do column) */}
-                      {status === 'todo' && (
-                        <button
-                          onClick={openAddTaskModal}
-                          className="mt-4 flex w-full items-center justify-center gap-1.5 border border-dashed border-zinc-800 hover:border-zinc-700 hover:bg-zinc-900/30 rounded-xl py-2.5 text-xs text-zinc-500 hover:text-zinc-300 transition-all font-semibold cursor-pointer"
-                        >
-                          <svg
-                            className="h-3.5 w-3.5"
-                            fill="none"
-                            viewBox="0 0 24 24"
-                            stroke="currentColor"
-                            strokeWidth={2.5}
-                          >
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                          </svg>
-                          <span>Add Task</span>
-                        </button>
-                      )}
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {/* 1. Skills Gained */}
+                        <div className="bg-zinc-950/60 border border-zinc-800 p-4 rounded-xl flex flex-col gap-2">
+                          <span className="text-xs font-semibold text-zinc-400">Skills Mastered</span>
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            {currentMember.skills && currentMember.skills.length > 0 ? (
+                              currentMember.skills.map((s, idx) => (
+                                <span key={idx} className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded text-[10px] font-semibold">
+                                  ✓ {s}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-zinc-500 italic">No skills registered</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 2. Pending Skills */}
+                        <div className="bg-zinc-950/60 border border-zinc-800 p-4 rounded-xl flex flex-col gap-2">
+                          <span className="text-xs font-semibold text-zinc-400">Skills In Progress</span>
+                          <div className="flex flex-wrap gap-1.5 mt-1">
+                            {currentMember.pendingSkills && currentMember.pendingSkills.length > 0 ? (
+                              currentMember.pendingSkills.map((ps, idx) => (
+                                <span key={idx} className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-2 py-0.5 rounded text-[10px] font-semibold animate-pulse">
+                                  ⏳ {ps} (Active task)
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-zinc-500 italic">No pending skills</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* 3. Task Completion */}
+                        {(() => {
+                          const myAssigned = tasks.filter((t) => t.assigneeId === user?.uid || t.partnerId === user?.uid);
+                          const myDone = myAssigned.filter((t) => t.status === 'done');
+                          const percent = myAssigned.length > 0 ? Math.round((myDone.length / myAssigned.length) * 100) : 0;
+
+                          return (
+                            <div className="bg-zinc-950/60 border border-zinc-800 p-4 rounded-xl flex flex-col gap-2">
+                              <span className="text-xs font-semibold text-zinc-400">My Task Completion</span>
+                              <div className="flex items-baseline justify-between">
+                                <span className="text-xl font-extrabold text-white">{myDone.length} / {myAssigned.length}</span>
+                                <span className="text-xs font-bold text-violet-400">{percent}%</span>
+                              </div>
+                              <div className="w-full bg-zinc-900 h-2 rounded-full overflow-hidden border border-zinc-800">
+                                <div
+                                  className="bg-gradient-to-r from-violet-500 to-emerald-400 h-full transition-all"
+                                  style={{ width: `${percent}%` }}
+                                ></div>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
-                  );
-                })}
-              </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* RIGHT SIDE: Tabbed Team & Real-Time Chat Panel */}
@@ -2256,6 +3081,187 @@ export default function ProjectPage() {
           </div>
         </div>
       )}
+
+      {/* ========================================================================= */}
+      {/* RAISE BLOCKER MODAL (Member side + AI Diagnosis) */}
+      {/* ========================================================================= */}
+      {isBlockerModalOpen && selectedBlockerTask && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="relative w-full max-w-lg rounded-2xl border border-zinc-800 bg-[#0c0c0e] p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            {/* Modal Header */}
+            <div className="flex items-start justify-between border-b border-zinc-800 pb-4">
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 rounded-lg bg-rose-600/20 border border-rose-500/30 text-rose-400">
+                    <span className="text-base">⚠️</span>
+                  </div>
+                  <h3 className="text-lg font-bold text-white">Raise a Blocker</h3>
+                </div>
+                <p className="text-xs text-zinc-400 mt-1">
+                  Task: <strong className="text-zinc-200">{selectedBlockerTask.title}</strong>
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setIsBlockerModalOpen(false);
+                  setSelectedBlockerTask(null);
+                  setBlockerSuccessMessage(null);
+                }}
+                className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-white transition-colors cursor-pointer"
+              >
+                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            {/* Form & AI Feedback */}
+            <form onSubmit={handleRaiseBlocker} className="flex flex-col gap-4 py-4">
+              {/* Description */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-300">
+                  What are you stuck on? <span className="text-rose-400">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  value={blockerDescription}
+                  onChange={(e) => setBlockerDescription(e.target.value)}
+                  placeholder="Describe the error, confusing requirement, or missing dependency in detail..."
+                  className="w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3.5 py-2.5 text-xs text-white placeholder-zinc-500 focus:border-rose-500 focus:outline-none focus:ring-1 focus:ring-rose-500 transition-all resize-none"
+                />
+              </div>
+
+              {/* Blocker Type Selector */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-300">Blocker Type:</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    'Technical error',
+                    'Unclear requirement',
+                    'Need review',
+                    'Waiting on teammate',
+                  ].map((type) => (
+                    <button
+                      key={type}
+                      type="button"
+                      onClick={() => setBlockerType(type as any)}
+                      className={`px-3 py-2 rounded-xl text-xs font-medium border text-left transition-all cursor-pointer ${
+                        blockerType === type
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/50 shadow-[0_0_10px_rgba(244,63,94,0.2)]'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-700'
+                      }`}
+                    >
+                      {type}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Notify Selector */}
+              <div className="flex items-center justify-between p-3 rounded-xl bg-zinc-950 border border-zinc-800">
+                <div>
+                  <span className="text-xs font-semibold text-zinc-300 block">Notification Scope</span>
+                  <span className="text-[10px] text-zinc-500">
+                    {blockerNotifyWhole ? 'Notify whole team in chat & dashboard' : 'Notify project leader only'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setBlockerNotifyWhole(!blockerNotifyWhole)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                    blockerNotifyWhole
+                      ? 'bg-violet-600 text-white shadow-[0_0_10px_rgba(124,58,237,0.3)]'
+                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {blockerNotifyWhole ? 'Whole Team' : 'Leader Only'}
+                </button>
+              </div>
+
+              {/* Success / AI Diagnosing Status Alert */}
+              {blockerSuccessMessage && (
+                <div className="p-3 rounded-xl bg-violet-950/30 border border-violet-500/40 text-xs text-violet-300 flex items-center gap-2 animate-fadeIn">
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-violet-400 border-t-transparent shrink-0" />
+                  <span>{blockerSuccessMessage}</span>
+                </div>
+              )}
+
+              {/* Live AI Diagnosis Display (if returned) */}
+              {recentAiDiagnosis && (
+                <div className="p-3.5 rounded-xl bg-violet-950/20 border border-violet-500/40 flex flex-col gap-2 animate-fadeIn">
+                  <div className="flex items-center gap-2 text-xs font-bold text-violet-300">
+                    <span>✨ Instant AI Diagnosis</span>
+                  </div>
+
+                  {recentAiDiagnosis.causes && recentAiDiagnosis.causes.length > 0 && (
+                    <div>
+                      <span className="text-[10px] text-zinc-400 font-semibold">Top Causes:</span>
+                      <ul className="list-decimal list-inside text-[11px] text-zinc-300 space-y-0.5 mt-0.5">
+                        {recentAiDiagnosis.causes.map((c: string, idx: number) => (
+                          <li key={idx}>{c}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {recentAiDiagnosis.fix && (
+                    <div className="p-2 rounded-lg bg-zinc-950 border border-violet-500/20 text-xs text-emerald-300 font-mono">
+                      💡 {recentAiDiagnosis.fix}
+                    </div>
+                  )}
+
+                  {recentAiDiagnosis.resource && (
+                    <a
+                      href={recentAiDiagnosis.resource}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-xs text-violet-400 hover:text-violet-300 underline inline-flex items-center gap-1"
+                    >
+                      <span>🔗 Reference Link</span>
+                    </a>
+                  )}
+                </div>
+              )}
+
+              {/* Modal Actions */}
+              <div className="flex items-center justify-end gap-2 border-t border-zinc-800 pt-3 mt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsBlockerModalOpen(false);
+                    setSelectedBlockerTask(null);
+                    setBlockerSuccessMessage(null);
+                  }}
+                  className="px-4 py-2 border border-zinc-800 hover:border-zinc-700 text-zinc-400 hover:text-white rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  {recentAiDiagnosis ? 'Done' : 'Cancel'}
+                </button>
+
+                {!recentAiDiagnosis && (
+                  <button
+                    type="submit"
+                    disabled={blockerSubmitting || !blockerDescription.trim()}
+                    className="flex items-center gap-2 px-5 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white rounded-xl text-xs font-semibold transition-all active:scale-[0.98] shadow-[0_0_15px_rgba(244,63,94,0.3)] cursor-pointer"
+                  >
+                    {blockerSubmitting ? (
+                      <>
+                        <div className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        <span>Submitting & Diagnosing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <span>Submit Blocker</span>
+                      </>
+                    )}
+                  </button>
+                )}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+

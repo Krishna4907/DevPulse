@@ -48,6 +48,8 @@ export interface Task {
   projectId: string;
   assigneeId: string | null;
   partnerId: string | null;
+  hasBlocker?: boolean;
+  blockerCount?: number;
   lastCommit?: {
     message: string;
     author: string;
@@ -67,11 +69,21 @@ export interface Task {
 export interface Blocker {
   id: string;
   taskId: string;
+  taskTitle?: string;
+  projectId?: string;
+  userId?: string;
+  userName?: string;
+  userImage?: string;
   description: string;
   type: string;
-  aiDiagnosis: { causes: string[]; fix: string } | null;
+  notifyWhole?: boolean;
+  aiDiagnosis?: {
+    causes: string[];
+    fix: string;
+    resource?: string;
+  } | null;
   resolved: boolean;
-  createdAt: Date;
+  createdAt?: any;
 }
 
 export interface SkillMap {
