@@ -80,3 +80,22 @@ export interface SkillMap {
   skills: string[];
   updatedAt: Date;
 }
+
+export interface ChatMessage {
+  id: string;
+  userId: string;
+  userName: string;
+  userImage: string;
+  text: string;
+  createdAt: any;
+}
+
+export interface Presence {
+  userId: string;
+  projectId?: string;
+  online: boolean;
+  lastSeen?: any;
+  typing?: boolean;
+  typingInProject?: string;
+}
+

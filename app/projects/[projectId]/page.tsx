@@ -1,11 +1,26 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useAuth } from '@/context/AuthContext';
 import { useParams, useRouter } from 'next/navigation';
 import { db } from '@/lib/firebase';
-import { doc, collection, query, onSnapshot, addDoc, updateDoc, setDoc, writeBatch, arrayUnion, increment, serverTimestamp } from 'firebase/firestore';
-import { Project, ProjectMember, Task } from '@/lib/types';
+import {
+  doc,
+  collection,
+  query,
+  onSnapshot,
+  addDoc,
+  updateDoc,
+  setDoc,
+  writeBatch,
+  arrayUnion,
+  increment,
+  serverTimestamp,
+  orderBy,
+  limitToLast,
+  getDoc,
+} from 'firebase/firestore';
+import { Project, ProjectMember, Task, ChatMessage, Presence } from '@/lib/types';
 import { scoreMembers } from '@/lib/scoring';
 import Link from 'next/link';
 
@@ -25,6 +40,16 @@ export default function ProjectPage() {
   const [joining, setJoining] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [isTeamPanelOpen, setIsTeamPanelOpen] = useState(true);
+
+  // Phase 4: Chat & Presence state
+  const [activePanelTab, setActivePanelTab] = useState<'team' | 'chat'>('team');
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messageInput, setMessageInput] = useState('');
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [presenceMap, setPresenceMap] = useState<Record<string, Presence>>({});
+  const [lastReadTimestamp, setLastReadTimestamp] = useState<any>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   // Modal controls
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(false);
@@ -148,6 +173,223 @@ export default function ProjectPage() {
       unsubTasks();
     };
   }, [projectId]);
+
+  // Phase 4: Presence Heartbeat & Visibility Lifecycle
+  useEffect(() => {
+    if (!user || !projectId) return;
+
+    const userPresenceRef = doc(db, 'presence', user.uid);
+
+    // Initial online presence
+    setDoc(
+      userPresenceRef,
+      {
+        userId: user.uid,
+        projectId,
+        online: true,
+        lastSeen: serverTimestamp(),
+        typing: false,
+        typingInProject: '',
+      },
+      { merge: true }
+    ).catch((err) => console.warn('Presence init notice:', err.message));
+
+    const handleVisibility = () => {
+      if (document.hidden) {
+        updateDoc(userPresenceRef, {
+          online: false,
+          lastSeen: serverTimestamp(),
+          typing: false,
+        }).catch(() => {});
+      } else {
+        updateDoc(userPresenceRef, {
+          online: true,
+          projectId,
+          lastSeen: serverTimestamp(),
+        }).catch(() => {});
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('beforeunload', handleVisibility);
+
+    // Presence listener across team
+    const unsubPresence = onSnapshot(
+      collection(db, 'presence'),
+      (snapshot) => {
+        const pMap: Record<string, Presence> = {};
+        snapshot.forEach((d) => {
+          pMap[d.id] = { userId: d.id, ...d.data() } as Presence;
+        });
+        setPresenceMap(pMap);
+      },
+      (err) => console.warn('Presence listener notice:', err.message)
+    );
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('beforeunload', handleVisibility);
+      unsubPresence();
+      updateDoc(userPresenceRef, {
+        online: false,
+        lastSeen: serverTimestamp(),
+        typing: false,
+      }).catch(() => {});
+    };
+  }, [user, projectId]);
+
+  // Phase 4: Real-time Messages Listener
+  useEffect(() => {
+    if (!projectId) return;
+
+    const messagesQuery = query(
+      collection(db, 'projects', projectId, 'messages'),
+      orderBy('createdAt', 'asc'),
+      limitToLast(100)
+    );
+
+    const unsubMessages = onSnapshot(
+      messagesQuery,
+      (snapshot) => {
+        const msgs: ChatMessage[] = [];
+        snapshot.forEach((d) => {
+          msgs.push({ id: d.id, ...d.data() } as ChatMessage);
+        });
+        setMessages(msgs);
+      },
+      (err) => console.warn('Messages listener notice:', err.message)
+    );
+
+    return () => unsubMessages();
+  }, [projectId]);
+
+  // Phase 4: Last-read tracking listener
+  useEffect(() => {
+    if (!user || !projectId) return;
+    const metaRef = doc(db, 'users', user.uid, 'projectMeta', projectId);
+    const unsubMeta = onSnapshot(
+      metaRef,
+      (docSnap) => {
+        if (docSnap.exists()) {
+          setLastReadTimestamp(docSnap.data()?.lastReadAt);
+        }
+      },
+      (err) => console.warn('Project meta listener notice:', err.message)
+    );
+    return () => unsubMeta();
+  }, [user, projectId]);
+
+  // Phase 4: When Chat tab is active, mark read & scroll to bottom
+  useEffect(() => {
+    if (activePanelTab === 'chat' && user && projectId) {
+      const metaRef = doc(db, 'users', user.uid, 'projectMeta', projectId);
+      setDoc(metaRef, { lastReadAt: serverTimestamp() }, { merge: true }).catch(() => {});
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [activePanelTab, messages, user, projectId]);
+
+  // Compute unread count when on 'team' tab
+  const unreadCount =
+    activePanelTab === 'chat'
+      ? 0
+      : messages.filter((m) => {
+          if (m.userId === user?.uid) return false;
+          if (!lastReadTimestamp) return true;
+          const msgTime = m.createdAt?.toDate ? m.createdAt.toDate().getTime() : new Date(m.createdAt).getTime();
+          const readTime = lastReadTimestamp?.toDate ? lastReadTimestamp.toDate().getTime() : new Date(lastReadTimestamp).getTime();
+          return msgTime > readTime;
+        }).length;
+
+  // Typing users list
+  const typingUsers = Object.values(presenceMap)
+    .filter((p) => p.typing && p.typingInProject === projectId && p.userId !== user?.uid)
+    .map((p) => {
+      const member = members.find((m) => m.userId === p.userId);
+      return member?.name || 'A team member';
+    });
+
+  // Message Send handler
+  const handleSendMessage = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!messageInput.trim() || sendingMessage || !user) return;
+    const text = messageInput.trim();
+    setMessageInput('');
+    setSendingMessage(true);
+
+    if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+    updateDoc(doc(db, 'presence', user.uid), { typing: false }).catch(() => {});
+
+    try {
+      await addDoc(collection(db, 'projects', projectId, 'messages'), {
+        userId: user.uid,
+        userName: user.displayName || 'Developer',
+        userImage: user.photoURL || '',
+        text,
+        createdAt: serverTimestamp(),
+      });
+
+      setDoc(
+        doc(db, 'users', user.uid, 'projectMeta', projectId),
+        { lastReadAt: serverTimestamp() },
+        { merge: true }
+      ).catch(() => {});
+    } catch (err: any) {
+      console.error('Error sending message:', err);
+    } finally {
+      setSendingMessage(false);
+    }
+  };
+
+  // Message Input Change & Typing Debounce
+  const handleMessageInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setMessageInput(e.target.value);
+    if (user) {
+      const userPresenceRef = doc(db, 'presence', user.uid);
+      updateDoc(userPresenceRef, {
+        typing: true,
+        typingInProject: projectId,
+      }).catch(() => {});
+
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => {
+        updateDoc(userPresenceRef, { typing: false }).catch(() => {});
+      }, 2000);
+    }
+  };
+
+  // Handle Enter to Send (Shift+Enter for newline)
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  // Format Chat Timestamp
+  const formatChatTimestamp = (timestamp: any) => {
+    if (!timestamp) return '';
+    const date = timestamp?.toDate ? timestamp.toDate() : new Date(timestamp);
+    if (isNaN(date.getTime())) return '';
+    const now = new Date();
+    const isToday = date.toDateString() === now.toDateString();
+    const timeStr = date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    if (isToday) return timeStr;
+    return `${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}, ${timeStr}`;
+  };
+
+  // Format Presence Last Seen
+  const formatLastSeen = (timestamp: any) => {
+    if (!timestamp) return 'Offline';
+    const date = timestamp?.toDate ? timestamp.toDate() : new Date(timestamp);
+    if (isNaN(date.getTime())) return 'Offline';
+    const diffMs = Date.now() - date.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+    if (diffMins < 1) return 'Active just now';
+    if (diffMins < 60) return `Last seen ${diffMins}m ago`;
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `Last seen ${diffHours}h ago`;
+    return `Last seen ${date.toLocaleDateString([], { month: 'short', day: 'numeric' })}`;
+  };
 
   // Check if current user is a member or leader
   const currentMember = user ? members.find((m) => m.userId === user.uid) : undefined;
@@ -1090,32 +1332,65 @@ export default function ProjectPage() {
               </div>
             </div>
 
-            {/* RIGHT SIDE: Collapsible Team Panel */}
+            {/* RIGHT SIDE: Tabbed Team & Real-Time Chat Panel */}
             {isTeamPanelOpen && (
-              <div className="w-full lg:w-[320px] xl:w-[360px] bg-zinc-900/30 border border-zinc-800/80 rounded-2xl p-5 flex flex-col self-start shrink-0 backdrop-blur-md transition-all animate-fadeIn">
-                <div className="border-b border-zinc-800 pb-3 mb-5 flex items-center justify-between">
-                  <div>
-                    <h3 className="text-base font-bold text-white">Team Members</h3>
-                    <p className="text-xs text-zinc-500 mt-0.5">
-                      {currentMemberCount} of {maxCapacity} slots filled
-                    </p>
-                  </div>
-
-                  <div className="flex items-center gap-2">
+              <div className="w-full lg:w-[340px] xl:w-[380px] bg-zinc-900/30 border border-zinc-800/80 rounded-2xl flex flex-col self-start shrink-0 backdrop-blur-md transition-all animate-fadeIn overflow-hidden h-[620px] shadow-xl">
+                {/* Panel Header & Tabs */}
+                <div className="border-b border-zinc-800 bg-zinc-950/40 p-3 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1 bg-zinc-900/80 p-1 rounded-xl border border-zinc-800/80">
                     <button
-                      onClick={handleCopyInviteLink}
-                      className="text-[11px] font-semibold bg-violet-600/10 text-violet-300 border border-violet-500/20 hover:bg-violet-600/20 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
-                      title="Copy project invite link"
+                      type="button"
+                      onClick={() => setActivePanelTab('team')}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        activePanelTab === 'team'
+                          ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(124,58,237,0.3)]'
+                          : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+                      }`}
                     >
-                      <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
                       </svg>
-                      <span>{copiedLink ? 'Copied' : 'Invite'}</span>
+                      <span>Team ({members.length})</span>
                     </button>
 
                     <button
+                      type="button"
+                      onClick={() => setActivePanelTab('chat')}
+                      className={`relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                        activePanelTab === 'chat'
+                          ? 'bg-violet-600 text-white shadow-[0_0_12px_rgba(124,58,237,0.3)]'
+                          : 'text-zinc-400 hover:text-white hover:bg-zinc-800/60'
+                      }`}
+                    >
+                      <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.741Z" />
+                      </svg>
+                      <span>Chat</span>
+                      {unreadCount > 0 && (
+                        <span className="flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-rose-500 text-[10px] font-extrabold text-white animate-pulse">
+                          {unreadCount > 9 ? '9+' : unreadCount}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="flex items-center gap-1.5">
+                    {activePanelTab === 'team' && (
+                      <button
+                        onClick={handleCopyInviteLink}
+                        className="text-[11px] font-semibold bg-violet-600/10 text-violet-300 border border-violet-500/20 hover:bg-violet-600/20 px-2 py-1 rounded-lg transition-colors flex items-center gap-1 cursor-pointer"
+                        title="Copy project invite link"
+                      >
+                        <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M13.19 8.688a4.5 4.5 0 0 1 1.242 7.244l-4.5 4.5a4.5 4.5 0 0 1-6.364-6.364l1.757-1.757m13.35-.622 1.757-1.757a4.5 4.5 0 0 0-6.364-6.364l-4.5 4.5a4.5 4.5 0 0 0 1.242 7.244" />
+                        </svg>
+                        <span>{copiedLink ? 'Copied' : 'Invite'}</span>
+                      </button>
+                    )}
+
+                    <button
                       onClick={() => setIsTeamPanelOpen(false)}
-                      className="text-zinc-500 hover:text-white p-1 rounded-lg transition-colors"
+                      className="text-zinc-500 hover:text-white p-1 rounded-lg transition-colors cursor-pointer"
                       title="Hide panel"
                     >
                       <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -1125,58 +1400,194 @@ export default function ProjectPage() {
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-4">
-                  {members.map((member) => (
-                    <div key={member.id} className="flex gap-3 items-start border-b border-zinc-800/40 pb-3.5 last:border-0 last:pb-0">
-                      {member.image ? (
-                        <img src={member.image} alt={member.name} className="h-8 w-8 rounded-full border border-zinc-800 mt-0.5" />
-                      ) : (
-                        <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-white mt-0.5">
-                          {member.name ? member.name[0] : 'U'}
-                        </div>
-                      )}
-
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-bold text-xs text-zinc-200 truncate">{member.name || 'Developer'}</span>
-                          <span
-                            className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
-                              member.role === 'leader'
-                                ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
-                                : 'bg-zinc-800 text-zinc-400'
-                            }`}
-                          >
-                            {member.role}
-                          </span>
-                        </div>
-
-                        {/* Skills tags */}
-                        <div className="mt-1.5 flex flex-wrap gap-1">
-                          {member.skills && member.skills.map((skill, skIdx) => (
-                            <span
-                              key={skIdx}
-                              className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium"
-                            >
-                              {skill}
-                            </span>
-                          ))}
-                          {member.pendingSkills && member.pendingSkills.map((pskill, pskIdx) => (
-                            <span
-                              key={`p-${pskIdx}`}
-                              className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium animate-pulse"
-                              title="Pending Acquisition (learning from assigned task)"
-                            >
-                              {pskill}*
-                            </span>
-                          ))}
-                          {(!member.skills || member.skills.length === 0) && (!member.pendingSkills || member.pendingSkills.length === 0) && (
-                            <span className="text-[10px] text-zinc-600 italic">No skills registered</span>
-                          )}
-                        </div>
-                      </div>
+                {/* TAB 1: TEAM MEMBERS LIST */}
+                {activePanelTab === 'team' && (
+                  <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3.5">
+                    <div className="flex items-center justify-between text-xs text-zinc-500 pb-1 border-b border-zinc-800/40">
+                      <span>{currentMemberCount} of {maxCapacity} slots filled</span>
+                      <span className="text-[11px] text-zinc-400 font-medium">Live Presence</span>
                     </div>
-                  ))}
-                </div>
+
+                    {members.map((member) => {
+                      const presence = presenceMap[member.userId];
+                      const isOnline = Boolean(presence?.online);
+
+                      return (
+                        <div key={member.id} className="flex gap-3 items-start border-b border-zinc-800/40 pb-3 last:border-0 last:pb-0">
+                          {/* Member Avatar with Presence Dot */}
+                          <div className="relative shrink-0 mt-0.5">
+                            {member.image ? (
+                              <img src={member.image} alt={member.name} className="h-8 w-8 rounded-full border border-zinc-800" />
+                            ) : (
+                              <div className="h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-semibold text-white">
+                                {member.name ? member.name[0] : 'U'}
+                              </div>
+                            )}
+                            <span
+                              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-[#0c0c0e] ${
+                                isOnline ? 'bg-emerald-500' : 'bg-zinc-500'
+                              }`}
+                              title={isOnline ? 'Active now' : formatLastSeen(presence?.lastSeen)}
+                            />
+                          </div>
+
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="font-bold text-xs text-zinc-200 truncate">{member.name || 'Developer'}</span>
+                              <span
+                                className={`px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
+                                  member.role === 'leader'
+                                    ? 'bg-violet-500/15 text-violet-400 border border-violet-500/20'
+                                    : 'bg-zinc-800 text-zinc-400'
+                                }`}
+                              >
+                                {member.role}
+                              </span>
+                            </div>
+
+                            {/* Presence status text */}
+                            <div className="flex items-center gap-1.5 text-[10px] mt-0.5">
+                              <span className={`h-1.5 w-1.5 rounded-full ${isOnline ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-500'}`} />
+                              <span className={isOnline ? 'text-emerald-400 font-medium' : 'text-zinc-500'}>
+                                {isOnline ? 'Active now' : formatLastSeen(presence?.lastSeen)}
+                              </span>
+                            </div>
+
+                            {/* Skills tags */}
+                            <div className="mt-1.5 flex flex-wrap gap-1">
+                              {member.skills && member.skills.map((skill, skIdx) => (
+                                <span
+                                  key={skIdx}
+                                  className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium"
+                                >
+                                  {skill}
+                                </span>
+                              ))}
+                              {member.pendingSkills && member.pendingSkills.map((pskill, pskIdx) => (
+                                <span
+                                  key={`p-${pskIdx}`}
+                                  className="bg-amber-500/10 text-amber-400 border border-amber-500/20 px-1.5 py-0.5 rounded-full text-[9px] font-medium animate-pulse"
+                                  title="Pending Acquisition (learning from assigned task)"
+                                >
+                                  {pskill}*
+                                </span>
+                              ))}
+                              {(!member.skills || member.skills.length === 0) && (!member.pendingSkills || member.pendingSkills.length === 0) && (
+                                <span className="text-[10px] text-zinc-600 italic">No skills registered</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* TAB 2: REAL-TIME TEAM CHAT */}
+                {activePanelTab === 'chat' && (
+                  <div className="flex-1 flex flex-col h-full min-h-0 bg-zinc-950/40">
+                    {/* Message List */}
+                    <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 min-h-0">
+                      {messages.length === 0 ? (
+                        <div className="flex-1 flex flex-col items-center justify-center text-center p-6 my-auto text-zinc-500">
+                          <div className="p-3 rounded-2xl bg-zinc-900 border border-zinc-800 text-zinc-400 mb-2">
+                            <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8.625 12a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H8.25m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0H12m4.125 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 0 1-2.555-.337A5.972 5.972 0 0 1 5.41 20.97a.75.75 0 0 1-.76-.84c.08-.667.14-1.341.18-2.022C3.12 16.63 2 14.437 2 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25Z" />
+                            </svg>
+                          </div>
+                          <p className="text-xs font-semibold text-zinc-300">No messages yet</p>
+                          <p className="text-[11px] text-zinc-500 mt-0.5">Start the conversation with your team!</p>
+                        </div>
+                      ) : (
+                        messages.map((msg) => {
+                          const isMe = msg.userId === user?.uid;
+
+                          return (
+                            <div
+                              key={msg.id}
+                              className={`flex gap-2 items-end ${isMe ? 'flex-row-reverse self-end' : 'flex-row self-start'} max-w-[88%]`}
+                            >
+                              {!isMe && (
+                                <div className="shrink-0 mb-0.5">
+                                  {msg.userImage ? (
+                                    <img src={msg.userImage} alt={msg.userName} className="h-7 w-7 rounded-full border border-zinc-800" />
+                                  ) : (
+                                    <div className="h-7 w-7 rounded-full bg-zinc-800 flex items-center justify-center text-[10px] font-bold text-white">
+                                      {msg.userName ? msg.userName[0] : 'U'}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+
+                              <div className={`flex flex-col ${isMe ? 'items-end' : 'items-start'} min-w-0`}>
+                                {!isMe && (
+                                  <span className="text-[10px] font-semibold text-zinc-400 mb-1 ml-1 truncate max-w-[180px]">
+                                    {msg.userName}
+                                  </span>
+                                )}
+
+                                <div
+                                  className={`px-3.5 py-2 rounded-2xl text-xs leading-relaxed break-words max-w-full ${
+                                    isMe
+                                      ? 'bg-[#7F77DD] text-white rounded-br-xs shadow-[0_2px_12px_rgba(127,119,221,0.25)]'
+                                      : 'bg-zinc-800/90 text-zinc-100 rounded-bl-xs border border-zinc-700/60'
+                                  }`}
+                                >
+                                  {msg.text}
+                                </div>
+
+                                <span className="text-[9px] text-zinc-500 mt-1 px-1">
+                                  {formatChatTimestamp(msg.createdAt)}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                      <div ref={messagesEndRef} />
+                    </div>
+
+                    {/* Typing Indicator */}
+                    {typingUsers.length > 0 && (
+                      <div className="px-4 py-1.5 text-[11px] text-violet-400 flex items-center gap-1.5 animate-fadeIn">
+                        <span className="flex gap-0.5">
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '0ms' }}></span>
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '150ms' }}></span>
+                          <span className="h-1.5 w-1.5 rounded-full bg-violet-400 animate-bounce" style={{ animationDelay: '300ms' }}></span>
+                        </span>
+                        <span className="italic font-medium">
+                          {typingUsers.length === 1 ? `${typingUsers[0]} is typing...` : 'Multiple team members are typing...'}
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Chat Input Bar */}
+                    <form onSubmit={handleSendMessage} className="p-3 border-t border-zinc-800 bg-zinc-900/60 flex items-end gap-2">
+                      <textarea
+                        value={messageInput}
+                        onChange={handleMessageInputChange}
+                        onKeyDown={handleKeyDown}
+                        placeholder="Type a message... (Enter to send)"
+                        rows={1}
+                        className="flex-1 resize-none bg-zinc-950 border border-zinc-800 focus:border-violet-500 focus:ring-1 focus:ring-violet-500 rounded-xl px-3 py-2 text-xs text-white placeholder-zinc-500 outline-none max-h-24 min-h-[38px] transition-all"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!messageInput.trim() || sendingMessage}
+                        className="h-[38px] w-[38px] shrink-0 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-40 disabled:hover:bg-violet-600 text-white flex items-center justify-center transition-all active:scale-95 shadow-[0_0_12px_rgba(124,58,237,0.3)] cursor-pointer"
+                        title="Send message"
+                      >
+                        {sendingMessage ? (
+                          <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                        ) : (
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
+                          </svg>
+                        )}
+                      </button>
+                    </form>
+                  </div>
+                )}
               </div>
             )}
           </div>
