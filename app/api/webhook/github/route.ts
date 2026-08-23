@@ -111,7 +111,7 @@ export async function POST(request: NextRequest) {
       return null;
     };
 
-    // EVENT 1: Push — move card to In Progress
+    // EVENT 1: Push — move card from To Do to In Progress
     if (event === 'push') {
       const commits = body.commits || [];
       console.log(`[Webhook] Processing ${commits.length} commits in push`);
@@ -129,8 +129,9 @@ export async function POST(request: NextRequest) {
 
         const { isAdmin, taskRef, taskData } = result;
 
-        if (taskData.status === 'done') {
-          console.log('[Webhook] Task already done, skipping');
+        // Never move backward if already inreview or done (especially on merge pushes to main)
+        if (taskData.status === 'done' || taskData.status === 'inreview') {
+          console.log(`[Webhook] Task is already in ${taskData.status}, ignoring push to inprogress`);
           continue;
         }
 
@@ -159,15 +160,15 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // EVENT 2: Pull Request opened — move to In Review
-    if (event === 'pull_request' && body.action === 'opened') {
+    // EVENT 2: Pull Request opened / synchronize / reopened — move to In Review
+    if (event === 'pull_request' && (body.action === 'opened' || body.action === 'synchronize' || body.action === 'reopened')) {
       const pr = body.pull_request;
       const prTitle = pr?.title || '';
       const prBody = pr?.body || '';
       const prHead = pr?.head?.ref || '';
       const searchText = `${prTitle} ${prBody} ${prHead}`;
 
-      console.log('PR opened event received');
+      console.log(`PR ${body.action} event received`);
       console.log('PR title:', prTitle);
       console.log('PR body:', prBody);
       console.log('PR head ref:', prHead);
@@ -180,7 +181,12 @@ export async function POST(request: NextRequest) {
       const result = await findTask(taskId);
       if (!result) return Response.json({ message: 'Task not found' });
 
-      const { isAdmin, taskRef } = result;
+      const { isAdmin, taskRef, taskData } = result;
+      if (taskData.status === 'done') {
+        console.log('[Webhook] Task already done, skipping inreview');
+        return Response.json({ message: 'Task already done' });
+      }
+
       console.log('[Webhook] Moving task to inreview:', taskId);
       const prData = {
         url: pr.html_url || '',
@@ -207,7 +213,7 @@ export async function POST(request: NextRequest) {
     if (
       event === 'pull_request' &&
       body.action === 'closed' &&
-      body.pull_request?.merged === true
+      (body.pull_request?.merged === true || !!body.pull_request?.merged_at)
     ) {
       const pr = body.pull_request;
       const prTitle = pr?.title || '';
